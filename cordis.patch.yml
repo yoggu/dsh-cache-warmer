@@ -1,0 +1,7 @@
+- insert:
+    - id: dsh-cache-warmer
+      name: 'dsh-cache-warmer'
+      config:
+        autoWarmNewChats: false
+        activeMinutes: 60
+        idleMinutes: 30

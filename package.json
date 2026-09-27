@@ -1,0 +1,35 @@
+{
+  "name": "dsh-cache-warmer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Provider-aware prompt-cache telemetry and opt-in safe cache warming for DeepSeek Harness sessions.",
+  "icon": "./icon.svg",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*": "./locale/*"
+  },
+  "files": ["lib", "client.js", "cordis.patch.yml", "README.md", "icon.svg", "locale"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-locale"]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "^0.1.6-alpha.2 || ^0.1.7-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-credentials": "^0.1.7-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "zod": "^4.4.3"
+  },
+  "engines": { "node": ">=22.19.0" },
+  "scripts": { "test": "node --test lib/*.test.js tests/*.test.js" }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Cache warmer",
+    "description": "Observe session prompt-cache usage and optionally keep supported routes warm."
+  }
+}
