@@ -240,7 +240,7 @@ window.__ModuleLoader__.load({
         : labels.unknownTtl;
 
       const requestEnabled = async (nextEnabled) => {
-        if (!sessionId || !supported || saving) return;
+        if (!sessionId || (nextEnabled && !supported) || saving) return;
         setSaving(true);
         setError('');
         try {
@@ -301,9 +301,12 @@ window.__ModuleLoader__.load({
       const reason = status && typeof status.reason === 'string' ? status.reason : '';
       const zh = locale.startsWith('zh');
       const reasonTexts = zh ? {
-        unsupported: '此线路暂无兼容的保温传输。', 'unknown-lifetime': '暂无适用的缓存有效期估计。',
+        unsupported: '此线路暂无兼容的保温传输。', 'unknown-lifetime': '此模型未配置缓存有效期；仅供观察。',
+        'policy-disabled': '此模型的缓存策略已禁止保温。', 'retention-disabled': '此线路已停用提示缓存保留。',
         'unknown-pricing': '模型价格未知，跳过自动保温。', 'no-cache-evidence': '等待实际请求报告缓存命中。',
         'no-context': '等待新的已完成请求，以获取当前上下文。', disabled: '此会话尚未启用自动保温。',
+        'request-in-flight': '实际请求正在进行中；保温将等待请求完成。',
+        'request-identity-unavailable': '无法解析当前 Harness 的请求标识；已停用自动保温。',
         'window-ended': '距上次实际请求的保温窗口已结束。', 'insufficient-savings': '预计收益低于 0.05 美元，跳过刷新。',
         'cache-elapsed': '预计缓存有效期已过；等待实际请求。', stopped: '因错误、未命中、取消或上下文变化而停止。',
         'no-storage': '持久化设置或费用记录不可用，已停止保温。',
@@ -368,7 +371,7 @@ window.__ModuleLoader__.load({
           },
             h('input', {
               className: 'dsh-cache-warmer-check', type: 'checkbox', checked: enabled,
-              disabled: !supported || saving || !sessionId,
+              disabled: (!supported && !enabled) || saving || !sessionId,
               onChange: (event) => requestEnabled(event.target.checked),
               style: { accentColor: 'var(--dsw-alias-brand-primary)' },
             }),
@@ -377,6 +380,10 @@ window.__ModuleLoader__.load({
             routeReason),
           supported && phase != null && h('div', { style: rowStyle },
             h('span', { style: mutedStyle }, labels.phase), h('span', { style: textStyle }, phaseLabel)),
+          status?.ruleSource && h('div', { style: { ...mutedStyle, paddingTop: 8 } },
+            status.ruleSource === 'custom' ? (zh ? '自定义有效期假设' : 'Custom lifetime assumption')
+              : status.ruleSource === 'codex-default' ? (zh ? 'Codex 默认估计' : 'Codex estimated default')
+              : (zh ? '有效期未知' : 'Lifetime unknown')),
           Number.isFinite(hitTokens) && h('div', { style: rowStyle },
             h('span', { style: mutedStyle }, labels.lastHit), h('span', { style: textStyle }, hitTokens.toLocaleString(locale))),
           timeLabel(labels.lastHitAt, status && status.lastCacheHitAt),
@@ -404,7 +411,11 @@ window.__ModuleLoader__.load({
     function SettingsPage({ ctx, embedded = false }) {
       const [values, setValues] = React.useState(null);
       const [draft, setDraft] = React.useState(null);
+      const [defaults, setDefaults] = React.useState([]);
       const [busy, setBusy] = React.useState(false);
+      const providerListId = React.useId();
+      const editable = value => ({ autoWarmNewChats: value.autoWarmNewChats, activeMinutes: value.activeMinutes,
+        idleMinutes: value.idleMinutes, useCodexDefaults: value.useCodexDefaults !== false, modelPolicies: value.modelPolicies || [] });
       const [error, setError] = React.useState('');
       const [locale, setLocale] = React.useState(() => getLocale(ctx));
       const zh = locale.toLowerCase().startsWith('zh');
@@ -412,16 +423,34 @@ window.__ModuleLoader__.load({
         title: '上下文缓存', description: '按预计收益决定是否保温；会产生 API 费用或消耗订阅用量。两个阶段均从上次实际模型请求开始计时，保温请求不会延长窗口。缓存时间为估计值。阶段设为 0 可停用。',
         defaultEnabled: '默认保持新对话的缓存活跃', active: '运行期间（分钟）', idle: '运行结束后（分钟）',
         loadError: '无法加载设置。', saveError: '保存失败。', save: '保存', saving: '保存中…', loading: '加载中…',
+        advanced: '模型缓存策略', builtins: '使用 Codex 默认估计', viewDefaults: '查看 Codex 默认估计',
+        customize: '自定义', customized: '已自定义', custom: '自定义假设', add: '添加模型', remove: '移除',
+        provider: 'Provider / 线路 ID', model: '精确模型 ID', allow: '允许保温', lifetime: '预计缓存有效期（分钟）', unknown: '未知',
+        empty: '暂无自定义规则。OpenRouter 默认仅供观察。',
+        assumption: '有效期只是本地调度假设，不会设置提供商的缓存 TTL。空白表示未知，不会自动保温。',
+        precedence: '自定义规则会完整替换默认值，包括空白。移除规则后恢复已启用的默认估计。每个对话的开关、缓存证据及收益检查仍然有效。',
+        transport: '当前保温传输仅支持 codex-personal、codex-business，以及 OpenRouter 的 ~deepseek/deepseek-v4-flash-latest。其他模型仅供观察；添加规则不会启用传输。',
+        defaultNote: '这些是模型系列的估计，不是提供商保证。可用自定义有效期覆盖。',
+        invalid: '请输入精确的 Provider / 模型 ID（不含通配符）、1–10080 的整数分钟或空白。最多 100 条，Provider / 模型组合不得重复。',
       } : {
         title: 'Context cache', description: 'Refresh only when estimated benefits justify the cost. Warming consumes API or subscription usage. Both windows start at the last real model request; refreshes never extend them. Cache time is an estimate. Set a phase to 0 to disable it.',
         defaultEnabled: 'Keep new chats warm by default', active: 'During an active run (minutes)', idle: 'After a run ends (minutes)',
         loadError: 'Could not load settings.', saveError: 'Save failed.', save: 'Save', saving: 'Saving …', loading: 'Loading …',
+        advanced: 'Model cache policies', builtins: 'Use Codex estimated defaults', viewDefaults: 'View Codex estimated defaults',
+        customize: 'Customize', customized: 'Customized', custom: 'Custom assumption', add: 'Add model', remove: 'Remove',
+        provider: 'Provider / route ID', model: 'Exact model ID', allow: 'Allow warming', lifetime: 'Estimated cache lifetime (minutes)', unknown: 'Unknown',
+        empty: 'No custom rules. OpenRouter is observation-only by default.',
+        assumption: 'The lifetime is a local scheduling assumption, not a provider TTL setting. Blank means unknown, with no automatic warming.',
+        precedence: 'A custom rule fully replaces its default, including blanks. Removing it restores enabled defaults. Per-chat consent, cache evidence and the savings check still apply.',
+        transport: 'Warming transports currently support codex-personal, codex-business, and OpenRouter’s ~deepseek/deepseek-v4-flash-latest only. Other models remain observation-only; adding a rule does not enable a transport.',
+        defaultNote: 'Model-family estimates, not provider guarantees. Customize to override the estimated lifetime.',
+        invalid: 'Use exact provider/model IDs (no wildcards), integer minutes from 1–10080 or blank. Maximum 100 rows; provider/model pairs must be unique.',
       };
       React.useEffect(() => {
         let active = true;
         fetch(`${route}?scope=settings`, { credentials: 'include' })
           .then(response => { if (!response.ok) throw new Error('settings'); return response.json(); })
-          .then(value => { if (active) { setValues(value); setDraft(value); } })
+          .then(value => { if (active) { const settings = editable(value); setValues(settings); setDraft(settings); setDefaults(value.defaultModelPolicies || []); } })
           .catch(() => { if (active) setError('load'); });
         return () => { active = false; };
       }, []);
@@ -439,7 +468,9 @@ window.__ModuleLoader__.load({
             headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'settings', ...draft }) });
           if (!response.ok) throw new Error('save');
           const result = await response.json();
-          setDraft(result); setValues(result);
+          const settings = editable(result);
+          setDraft(settings); setValues(settings);
+          if (Array.isArray(result.defaultModelPolicies)) setDefaults(result.defaultModelPolicies);
         } catch { setError('save'); }
         finally { setBusy(false); }
       };
@@ -448,8 +479,26 @@ window.__ModuleLoader__.load({
           className: 'dsh-cache-settings-input', disabled: busy,
           value: draft[key], onChange: event => set(key, event.target.value === '' ? '' : Number(event.target.value)),
         }));
-      const valid = draft && Number.isInteger(draft.activeMinutes) && draft.activeMinutes >= 0 && draft.activeMinutes <= 1440
+      const rows = draft?.modelPolicies || [];
+      const pair = row => JSON.stringify([row.provider, row.model]);
+      const validMinutes = n => n === null || (Number.isInteger(n) && n >= 1 && n <= 10080);
+      const validRows = rows.length <= 100 && new Set(rows.map(pair)).size === rows.length && rows.every(row =>
+        typeof row.provider === 'string' && row.provider.length <= 128 && /^[A-Za-z0-9_.-]+$/.test(row.provider)
+        && typeof row.model === 'string' && row.model.length > 0 && row.model.length <= 256 && row.model === row.model.trim()
+        && !/[*?\[\]{}]/.test(row.model) && typeof row.enabled === 'boolean' && validMinutes(row.cacheMinutes));
+      const valid = draft && validRows && Number.isInteger(draft.activeMinutes) && draft.activeMinutes >= 0 && draft.activeMinutes <= 1440
         && Number.isInteger(draft.idleMinutes) && draft.idleMinutes >= 0 && draft.idleMinutes <= 1440;
+      const updateRow = (index, key, value) => set('modelPolicies', rows.map((row, i) => i === index ? { ...row, [key]: value } : row));
+      const addRow = row => { if (!busy && rows.length < 100) set('modelPolicies', [...rows, { ...row }]); };
+      const switchControl = (label, checked, onClick) => h('button', { type: 'button', role: 'switch', className: 'dsh-cache-settings-switch',
+        'aria-label': label, 'aria-checked': checked, disabled: busy, onClick }, h('span', { className: 'dsh-cache-settings-thumb', 'aria-hidden': true }));
+      const policyField = (row, index, key, title, numeric = false) => h('label', { className: 'dsh-cache-policy-field' },
+        h('span', null, title), h('input', { className: 'dsh-cache-policy-input', type: numeric ? 'number' : 'text', disabled: busy,
+          'aria-label': `${title} ${index + 1}`, value: row[key] ?? '',
+          ...(numeric ? { min: 1, max: 10080, step: 1, placeholder: settingsText.unknown }
+            : { maxLength: key === 'provider' ? 128 : 256, autoComplete: 'off', spellCheck: false,
+                ...(key === 'provider' ? { list: providerListId } : {}) }),
+          onChange: event => updateRow(index, key, numeric ? (event.target.value === '' ? null : Number(event.target.value)) : event.target.value) }));
       return h('section', { className: 'dsh-cache-settings', style: { padding: embedded ? '0' : '20px 24px' } },
         !embedded && h('h2', null, settingsText.title),
         h('p', { className: 'dsh-cache-settings-description' }, settingsText.description),
@@ -462,6 +511,38 @@ window.__ModuleLoader__.load({
               h('span', { className: 'dsh-cache-settings-thumb', 'aria-hidden': true }))),
           field('activeMinutes', settingsText.active),
           field('idleMinutes', settingsText.idle),
+          h('details', { className: 'dsh-cache-policy-section' },
+            h('summary', null, settingsText.advanced),
+            h('p', { className: 'dsh-cache-policy-note' }, settingsText.assumption),
+            h('label', { className: 'dsh-cache-settings-row' }, h('span', { className: 'dsh-cache-settings-label' }, settingsText.builtins),
+              switchControl(settingsText.builtins, draft.useCodexDefaults, () => set('useCodexDefaults', !draft.useCodexDefaults))),
+            h('details', { className: 'dsh-cache-policy-defaults' },
+              h('summary', null, `${settingsText.viewDefaults} (${defaults.length})`),
+              h('p', { className: 'dsh-cache-policy-note' }, settingsText.defaultNote),
+              defaults.map(row => {
+                const exists = rows.some(value => pair(value) === pair(row));
+                return h('div', { className: 'dsh-cache-policy-default', key: pair(row) },
+                  h('div', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, h('div', null, row.provider), h('strong', null, row.model),
+                    h('div', null, row.cacheMinutes == null ? settingsText.unknown : `${row.cacheMinutes} ${zh ? '分钟' : 'min'}`)),
+                  h('button', { type: 'button', className: 'dsh-cache-policy-button', disabled: busy || exists || rows.length >= 100,
+                    'aria-label': `${settingsText.customize} ${row.provider}/${row.model}`, onClick: () => addRow(row) }, exists ? settingsText.customized : settingsText.customize));
+              })),
+            h('p', { className: 'dsh-cache-policy-note' }, settingsText.precedence),
+            h('datalist', { id: providerListId }, ['openrouter', 'codex-personal', 'codex-business'].map(value => h('option', { key: value, value }))),
+            !rows.length && h('p', { className: 'dsh-cache-policy-note' }, settingsText.empty),
+            rows.map((row, index) => h('fieldset', { className: 'dsh-cache-policy-card', key: index },
+              h('legend', null, `${settingsText.custom} ${index + 1}`),
+              h('div', { className: 'dsh-cache-policy-grid' }, policyField(row, index, 'provider', settingsText.provider), policyField(row, index, 'model', settingsText.model)),
+              h('div', { style: { marginBottom: 12 } }, policyField(row, index, 'cacheMinutes', settingsText.lifetime, true)),
+              h('div', { className: 'dsh-cache-policy-actions' },
+                h('label', { className: 'dsh-cache-policy-toggle' }, h('span', null, settingsText.allow),
+                  switchControl(`${settingsText.allow} ${index + 1}`, row.enabled, () => updateRow(index, 'enabled', !row.enabled))),
+                h('button', { type: 'button', className: 'dsh-cache-policy-button', disabled: busy,
+                  'aria-label': `${settingsText.remove} ${index + 1}`, onClick: () => set('modelPolicies', rows.filter((_, i) => i !== index)) }, settingsText.remove)))),
+            h('button', { type: 'button', className: 'dsh-cache-policy-button', disabled: busy || rows.length >= 100,
+              onClick: () => addRow({ provider: 'openrouter', model: '', enabled: false, cacheMinutes: null }) }, settingsText.add),
+            !validRows && h('p', { role: 'alert', className: 'dsh-cache-settings-error' }, settingsText.invalid),
+            h('p', { className: 'dsh-cache-policy-note' }, settingsText.transport)),
           h('div', { className: 'dsh-cache-settings-footer' },
             h('button', { type: 'button', className: 'dsh-cache-settings-save',
               disabled: busy || !valid || JSON.stringify(values) === JSON.stringify(draft), onClick: save },
@@ -488,6 +569,23 @@ window.__ModuleLoader__.load({
 .dsh-cache-settings-label{flex:1;min-width:0;font-size:13px;font-weight:500;line-height:1.5}
 .dsh-cache-settings-input{box-sizing:border-box;width:88px;flex:none;height:34px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font:inherit;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary)}
 .dsh-cache-settings-input:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+.dsh-cache-policy-section{margin-top:12px;border-top:.5px solid var(--dsw-alias-border-l2);padding-top:16px}
+.dsh-cache-policy-section summary{cursor:pointer;font-weight:500;line-height:24px}
+.dsh-cache-policy-note{font-size:12px;line-height:19px;color:var(--dsw-alias-label-secondary);margin:12px 0;overflow-wrap:anywhere}
+.dsh-cache-policy-defaults{margin-bottom:16px}
+.dsh-cache-policy-default{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:.5px solid var(--dsw-alias-border-l2);font-size:12px}
+.dsh-cache-policy-card{min-width:0;margin:16px 0;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md)}
+.dsh-cache-policy-card legend{padding:0 6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.dsh-cache-policy-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-bottom:12px}
+.dsh-cache-policy-field{display:flex;flex-direction:column;gap:6px;min-width:0;font-size:12px}
+.dsh-cache-policy-input{box-sizing:border-box;width:100%;min-width:0;height:34px;padding:0 10px;border:1px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font:inherit;color:var(--dsw-alias-label-primary)}
+.dsh-cache-policy-input:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.dsh-cache-policy-actions,.dsh-cache-policy-toggle{display:flex;align-items:center;gap:12px}
+.dsh-cache-policy-actions{justify-content:space-between}
+.dsh-cache-policy-button{appearance:none;padding:5px 10px;border:1px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;flex-shrink:0}
+.dsh-cache-policy-button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-cache-policy-button:disabled{opacity:.45;cursor:default}
+@media(max-width:480px){.dsh-cache-policy-grid{grid-template-columns:minmax(0,1fr)}.dsh-cache-policy-input{font-size:16px}.dsh-cache-policy-default{align-items:flex-start}}
 .dsh-cache-settings-footer{display:flex;align-items:center;gap:8px;padding-top:16px}
 .dsh-cache-settings-save{appearance:none;border:1px solid transparent;border-radius:var(--dsw-radius-md);padding:5px 14px;font:inherit;font-size:13px;line-height:1.5;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}
 .dsh-cache-settings-save:disabled{opacity:.4;cursor:default}
