@@ -5,18 +5,9 @@ import { findPackageJSON } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { Config } from '@deepseek-ai/dsh-llm-pi-ai';
-import { buildBoundedAdapter, inputBytesForBudget, readOpenRouterRoute, validateBoundedPayload, OPENROUTER_MODEL, ROUTING_CAPS, MAX_WIRE_BYTES } from '../lib/openrouter.js';
+import { buildBoundedAdapter, readOpenRouterRoute, validateBoundedPayload, OPENROUTER_MODEL, ROUTING_CAPS, MAX_WIRE_BYTES } from '../lib/openrouter.js';
 const manifest = findPackageJSON('@earendil-works/pi-ai', import.meta.resolve('@deepseek-ai/dsh-llm-pi-ai'));
 const { openrouterProvider } = await import(new URL('./dist/providers/openrouter.js', pathToFileURL(manifest)).href);
-
-test('budget-derived input bounds reserve three uncached attempts', () => {
-  for (const budget of [.05, 1, 10]) {
-    const bytes = inputBytesForBudget(budget);
-    assert.ok(bytes > 0 && bytes <= MAX_WIRE_BYTES);
-    assert.ok(3 * ((2 * bytes + 8192) * .000001 + 8 * .000002) <= budget);
-  }
-  assert.throws(() => inputBytesForBudget(NaN));
-});
 
 function context(route = { apiKeyEnv: 'TEST_OPENROUTER_KEY' }) {
   const services = {

@@ -2,7 +2,13 @@
   "name": "dsh-cache-warmer",
   "version": "0.1.0",
   "private": true,
-  "description": "Provider-aware prompt-cache telemetry and opt-in safe cache warming for DeepSeek Harness sessions.",
+  "description": "Estimated cache time and opt-in, cost-aware prompt-cache warming for DeepSeek Harness sessions.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yoggu/dsh-cache-warmer.git"
+  },
+  "homepage": "https://github.com/yoggu/dsh-cache-warmer#readme",
+  "bugs": { "url": "https://github.com/yoggu/dsh-cache-warmer/issues" },
   "icon": "./icon.svg",
   "type": "module",
   "license": "MIT",

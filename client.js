@@ -49,12 +49,12 @@ window.__ModuleLoader__.load({
     function createLabels(locale) {
       const zh = String(locale || 'en').toLowerCase().startsWith('zh');
       return zh ? {
-        unknownTtl: '缓存 —', ttl: '缓存有效期', remaining: '缓存约 ',
+        unknownTtl: '缓存时间 —', ttl: '预计剩余缓存时间', remaining: '缓存时间 ~',
         toggle: '保持缓存活跃', status: '上下文缓存', phase: '阶段',
         reason: '说明', lastHit: '上次命中的缓存令牌', lastHitAt: '上次缓存命中', lastWarm: '上次保温请求',
         observationOnly: '仅供观察', unknown: '有效期尚未确认',
         inactive: '未启用', active: '活跃', idle: '空闲', running: '运行中',
-        nextRefresh: '下次刷新', windowEnds: '窗口结束',
+        nextRefresh: '下次保温评估', windowEnds: '保温窗口结束',
         unavailable: '状态不可用', loading: '加载中…',
         failed: '无法加载缓存状态', saveFailed: '无法保存设置',
         unsupported: '此模型线路尚不支持自动保温', expired: '已过期',
@@ -63,12 +63,12 @@ window.__ModuleLoader__.load({
         noStorage: '持久化设置不可用；已停止自动保温。', noConsent: '此会话尚未启用自动保温。',
         windowClosed: '已超出设定的活跃时间窗口。',
       } : {
-        unknownTtl: 'Cache —', ttl: 'Cache TTL', remaining: 'Cache ~',
+        unknownTtl: 'Cache time —', ttl: 'Estimated cache time remaining', remaining: 'Cache time ~',
         toggle: 'Keep cache warm', status: 'Context cache', phase: 'Phase',
         reason: 'Note', lastHit: 'Last cached tokens', lastHitAt: 'Last cache hit', lastWarm: 'Last warm request',
         observationOnly: 'Observation only', unknown: 'No reliable TTL',
         inactive: 'Inactive', active: 'Active', idle: 'Idle', running: 'Running',
-        nextRefresh: 'Next refresh', windowEnds: 'Window ends',
+        nextRefresh: 'Next warming decision', windowEnds: 'Warming window ends',
         unavailable: 'Status unavailable', loading: 'Loading …',
         failed: 'Could not load cache status', saveFailed: 'Could not save the setting',
         unsupported: 'Not supported for this route', expired: 'Expired',
@@ -236,7 +236,7 @@ window.__ModuleLoader__.load({
       const remainingMs = hasExpiry ? Math.max(0, expiresAt - now) : NaN;
       const ringRatio = hasExpiry ? Math.max(0, Math.min(1, remainingMs / ttlMs)) : 0;
       const pillText = hasExpiry
-        ? `${labels.remaining}${formatDuration(remainingMs, labels)}`
+        ? `${labels.remaining}${Math.ceil(remainingMs / 60000)}${locale.startsWith('zh') ? '分钟' : 'm'}`
         : labels.unknownTtl;
 
       const requestEnabled = async (nextEnabled) => {
@@ -299,13 +299,23 @@ window.__ModuleLoader__.load({
       const stateText = labels[stateLabel] || stateLabel;
       const hitTokens = finiteNumber(status && status.lastCacheHitTokens);
       const reason = status && typeof status.reason === 'string' ? status.reason : '';
-      const routeReason = status?.reasonCode === 'codex-unbounded'
-        ? (locale.startsWith('zh') ? 'Codex 传输无法限制输出，自动保温不可用。提供商不报告缓存到期时间。' : 'Codex does not enforce an output limit, so automatic warming is unavailable. The provider does not report cache expiry.')
-        : labels.unverified;
-      const reasonText = !supported ? routeReason
-        : reason.includes('Durable preferences') ? labels.noStorage
-        : reason.includes('not enabled') ? labels.noConsent
-        : reason.includes('window has ended') ? labels.windowClosed : reason;
+      const zh = locale.startsWith('zh');
+      const reasonTexts = zh ? {
+        unsupported: '此线路暂无兼容的保温传输。', 'unknown-lifetime': '暂无适用的缓存有效期估计。',
+        'unknown-pricing': '模型价格未知，跳过自动保温。', 'no-cache-evidence': '等待实际请求报告缓存命中。',
+        'no-context': '等待新的已完成请求，以获取当前上下文。', disabled: '此会话尚未启用自动保温。',
+        'window-ended': '距上次实际请求的保温窗口已结束。', 'insufficient-savings': '预计收益低于 0.05 美元，跳过刷新。',
+        'cache-elapsed': '预计缓存有效期已过；等待实际请求。', stopped: '因错误、未命中、取消或上下文变化而停止。',
+        'no-storage': '持久化设置或费用记录不可用，已停止保温。',
+      } : {};
+      const routeReason = reasonTexts[status?.reasonCode] || reason || labels.unsupported;
+      const reasonText = reasonTexts[status?.reasonCode] || reason;
+      const elapsedText = zh ? '预计有效期已过（不代表缓存已删除）' : 'Estimated lifetime elapsed (not confirmed eviction)';
+      const tooltipText = hasExpiry ? (remainingMs > 0 ? labels.ttl : elapsedText)
+        : (zh ? '缓存有效期未知' : 'Cache lifetime unknown');
+      const money = value => Number.isFinite(value) ? `${value < 0 ? '−' : ''}$${Math.abs(value).toFixed(3)}` : '—';
+      const metric = (name, value) => h('div', { key: name, style: rowStyle },
+        h('span', { style: mutedStyle }, name), h('span', { style: textStyle }, value));
       const errorText = error === 'save' ? labels.saveFailed : error === 'load' ? labels.failed : '';
       const showRing = hasExpiry;
 
@@ -344,7 +354,7 @@ window.__ModuleLoader__.load({
             h('circle', { cx: 10, cy: 10, r: 8, fill: 'none', stroke: 'currentColor',
               strokeOpacity: 0.65, strokeWidth: 2 })), 
           h('span', { className: 'dsh-cache-warmer-label', style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, pillText)),
-        h(PillTooltip, {anchor:triggerRef, text:hasExpiry ? pillText : (locale.startsWith('zh') ? '缓存有效期未知' : 'Cache lifetime unknown'), visible:hover && !open, id:tipId}),
+        h(PillTooltip, {anchor:triggerRef, text:tooltipText, visible:hover && !open, id:tipId}),
         open && createPortal(h('div', { className: 'dsh-cache-warmer-panel', ref: panelRef, role: 'dialog', 'aria-label': labels.status, style: popoverStyle },
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
             marginBottom: 8, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' } },
@@ -352,7 +362,7 @@ window.__ModuleLoader__.load({
             h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontWeight: 400 } },
               loading ? labels.loading : !supported ? labels.observationOnly : stateText || labels.unavailable)),
           h('div', { 'aria-hidden': true, style: { borderTop: '.5px solid var(--dsw-alias-border-l2)', marginBottom: 10 } }),
-          h('div', { style: { color: 'var(--dsw-alias-label-tertiary)' } }, hasExpiry ? `${labels.ttl}: ${formatDuration(remainingMs, labels)}` : labels.unknown),
+          h('div', { style: { color: 'var(--dsw-alias-label-tertiary)' } }, hasExpiry ? (remainingMs > 0 ? `${labels.ttl}: ${Math.ceil(remainingMs / 60000)} ${labels.minutes}` : elapsedText) : labels.unknown),
           h('label', {
             style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, cursor: supported ? 'pointer' : 'not-allowed' },
           },
@@ -373,6 +383,16 @@ window.__ModuleLoader__.load({
           timeLabel(labels.lastWarm, status && status.lastWarmAt),
           timeLabel(labels.nextRefresh, status && status.nextRefreshAt),
           timeLabel(labels.windowEnds, status && status.windowEndsAt),
+          status?.decision && h(React.Fragment, null,
+            metric(zh ? '预计刷新费用' : 'Estimated refresh cost', money(status.decision.refreshCostUsd)),
+            metric(zh ? '预计净收益' : 'Expected net benefit', money(status.decision.expectedSavingsUsd)),
+            metric(zh ? '继续对话概率' : 'Continuation probability', `${Math.round(status.decision.probability * 100)}%`)),
+          status?.warmUsage && h(React.Fragment, null,
+            metric(zh ? '保温请求次数' : 'Warm requests', String(status.warmUsage.attempts)),
+            metric(zh ? '保温费用估计' : 'Warm usage estimate', `${money(status.warmUsage.usd)}${status.warmUsage.unpriced ? (zh ? ' · 部分' : ' · partial') : ''}`)),
+          status?.decision?.subscription && h('div', { style: { ...mutedStyle, paddingTop: 8 } },
+            zh ? '按 API 等价价格估计，并非订阅配额。保温会消耗用量；Codex 不保证输出令牌上限。'
+              : 'API-equivalent estimate, not subscription allowance. Warming consumes usage; Codex has no guaranteed output cap.'),
           reason && supported && h('div', { style: { ...mutedStyle, paddingTop: 8, overflowWrap: 'anywhere' } },
             h('span', { style: textStyle }, `${labels.reason}: `), reasonText),
           errorText && h('div', {
@@ -389,12 +409,12 @@ window.__ModuleLoader__.load({
       const [locale, setLocale] = React.useState(() => getLocale(ctx));
       const zh = locale.toLowerCase().startsWith('zh');
       const settingsText = zh ? {
-        title: '上下文缓存', description: 'OpenRouter 保温需主动启用并会产生费用；每个请求前缀最多刷新三次。发生错误、缓存未命中或上下文超出预算时停止。预算按未缓存输入保守预留，不是账单保证。刷新间隔不是缓存有效期。Codex 传输不支持输出上限，因此不可自动保温。阶段设为 0 可停用。',
-        defaultEnabled: '默认保持新对话的缓存活跃', active: '运行期间（分钟）', idle: '运行结束后（分钟）', refresh: '刷新间隔（分钟）', budget: '每个请求前缀的保温预算（美元）',
+        title: '上下文缓存', description: '按预计收益决定是否保温；会产生 API 费用或消耗订阅用量。两个阶段均从上次实际模型请求开始计时，保温请求不会延长窗口。缓存时间为估计值。阶段设为 0 可停用。',
+        defaultEnabled: '默认保持新对话的缓存活跃', active: '运行期间（分钟）', idle: '运行结束后（分钟）',
         loadError: '无法加载设置。', saveError: '保存失败。', save: '保存', saving: '保存中…', loading: '加载中…',
       } : {
-        title: 'Context cache', description: 'Opt-in, billable OpenRouter warming: at most three bounded refreshes per request prefix. Stops on errors, cache misses or oversized context. The budget reserves uncached input conservatively, not an invoice guarantee. Refresh interval is not cache TTL. Codex warming is unavailable because its transport does not enforce an output limit. Set a phase to 0 to disable it.',
-        defaultEnabled: 'Keep new chats warm by default', active: 'During an active run (minutes)', idle: 'After a run ends (minutes)', refresh: 'Refresh interval (minutes)', budget: 'Warming budget per request prefix (USD)',
+        title: 'Context cache', description: 'Refresh only when estimated benefits justify the cost. Warming consumes API or subscription usage. Both windows start at the last real model request; refreshes never extend them. Cache time is an estimate. Set a phase to 0 to disable it.',
+        defaultEnabled: 'Keep new chats warm by default', active: 'During an active run (minutes)', idle: 'After a run ends (minutes)',
         loadError: 'Could not load settings.', saveError: 'Save failed.', save: 'Save', saving: 'Saving …', loading: 'Loading …',
       };
       React.useEffect(() => {
@@ -429,9 +449,7 @@ window.__ModuleLoader__.load({
           value: draft[key], onChange: event => set(key, event.target.value === '' ? '' : Number(event.target.value)),
         }));
       const valid = draft && Number.isInteger(draft.activeMinutes) && draft.activeMinutes >= 0 && draft.activeMinutes <= 1440
-        && Number.isInteger(draft.idleMinutes) && draft.idleMinutes >= 0 && draft.idleMinutes <= 1440
-        && Number.isInteger(draft.refreshMinutes) && draft.refreshMinutes >= 1 && draft.refreshMinutes <= 60
-        && typeof draft.maxBudgetUsd === 'number' && draft.maxBudgetUsd >= .05 && draft.maxBudgetUsd <= 10;
+        && Number.isInteger(draft.idleMinutes) && draft.idleMinutes >= 0 && draft.idleMinutes <= 1440;
       return h('section', { className: 'dsh-cache-settings', style: { padding: embedded ? '0' : '20px 24px' } },
         !embedded && h('h2', null, settingsText.title),
         h('p', { className: 'dsh-cache-settings-description' }, settingsText.description),
@@ -444,8 +462,6 @@ window.__ModuleLoader__.load({
               h('span', { className: 'dsh-cache-settings-thumb', 'aria-hidden': true }))),
           field('activeMinutes', settingsText.active),
           field('idleMinutes', settingsText.idle),
-          field('refreshMinutes', settingsText.refresh, 1, 60),
-          field('maxBudgetUsd', settingsText.budget, .05, 10, .05),
           h('div', { className: 'dsh-cache-settings-footer' },
             h('button', { type: 'button', className: 'dsh-cache-settings-save',
               disabled: busy || !valid || JSON.stringify(values) === JSON.stringify(draft), onClick: save },
