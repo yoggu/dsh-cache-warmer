@@ -125,12 +125,3 @@ The integration tests require the tested Harness dependencies and a sibling `dsh
 ## License
 
 MIT; see [LICENSE](LICENSE).
-
-## References
-
-- [Pi cache warming](https://github.com/earendil-works/pi/blob/v0.86.0/packages/coding-agent/docs/settings.md#cache-warming)
-- [Pi provider lifetime configuration](https://github.com/earendil-works/pi/blob/v0.86.0/packages/coding-agent/docs/models.md#prompt-cache-lifetimes)
-- [CodexZero lifetime estimates](https://github.com/Retro2512/CodexZero/blob/c6683582435ae476e29b1446cdc230779cd7b5e1/src/cache-accounting.mjs)
-- [CodexZero warming](https://github.com/Retro2512/CodexZero/blob/c6683582435ae476e29b1446cdc230779cd7b5e1/src/cache-monitor.mjs)
-- [DeepSeek caching](https://api-docs.deepseek.com/guides/kv_cache/)
-- [OpenRouter caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching)
