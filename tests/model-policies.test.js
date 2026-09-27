@@ -211,6 +211,12 @@ test('OpenRouter never invents a lifetime or cadence; compatible catalog models 
     assert.equal(reviewed.cacheTtlMs, 5 * MINUTE)
     assert.equal(decisionDelay(reviewed), 4.5 * MINUTE)
   }
+  for (const model of ['openai/gpt-4.1', 'openai/gpt-5', 'google/gemini-2.5-pro', 'deepseek/deepseek-chat']) {
+    const p = policyFor('openrouter', model, settings(row({ provider: 'openrouter', model, cacheMinutes: 10 })))
+    assert.equal(p.transportSupported, true, model)
+    assert.equal(p.cacheTtlMs, 10 * MINUTE)
+    assert.equal(decisionDelay(p), 9 * MINUTE)
+  }
   const unsupported = policyFor('openrouter', 'unknown/model',
     settings(row({ provider: 'openrouter', model: 'unknown/model' })))
   assert.equal(unsupported.cacheTtlMs, 30 * MINUTE)

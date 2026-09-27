@@ -76,6 +76,38 @@ test('provider lookup failure is safe and disposal ends pending UI waits', async
   assert.deepEqual(await stalled.load(), { providers: [], error: 'provider-discovery-failed' })
 })
 
+test('stalled providers cannot starve healthy models later in the registry', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const directory = createModelDirectory({ llm: {
+    listProviders: () => [...Array.from({ length: 6 }, (_, i) => ({ id: `stalled-${i}` })), { id: 'healthy' }],
+    listModels: async p => p === 'healthy' ? [{ id: 'available' }] : new Promise(() => {}),
+  } }, { inspect, timeoutMs: 100 })
+  const work = directory.load()
+  await flush(); t.mock.timers.tick(100)
+  const result = await work
+  assert.equal(result.providers[6].models[0].id, 'available')
+  assert.ok(result.providers.slice(0, 6).every(p => p.error === 'model-discovery-timeout'))
+  directory.dispose(); t.mock.timers.reset()
+})
+
+test('adapter replacement invalidates a hanging same-id lookup without accepting its stale result', async () => {
+  const stalled = deferred()
+  let replaced = false, calls = 0
+  const directory = createModelDirectory({ llm: {
+    listProviders: () => [{ id: 'same-route' }],
+    listModels: async () => { calls++; return replaced ? [{ id: 'new-model' }] : stalled.promise },
+  } }, { inspect })
+  const old = directory.load()
+  await flush(); replaced = true; directory.invalidate()
+  const fresh = await directory.load()
+  assert.equal(fresh.providers[0].models[0].id, 'new-model')
+  assert.equal(calls, 2)
+  assert.equal((await old).error, 'provider-discovery-failed')
+  stalled.resolve([{ id: 'stale-model' }]); await flush()
+  assert.equal((await directory.load()).providers[0].models[0].id, 'new-model')
+  directory.dispose()
+})
+
 test('capability metadata distinguishes unsupported providers and missing configured routes', () => {
   const ctx = { get: () => undefined }
   assert.deepEqual(modelTransportInfo(ctx, 'deepseek', 'deepseek-chat'), { transportSupported: false, reasonCode: 'unsupported-provider' })

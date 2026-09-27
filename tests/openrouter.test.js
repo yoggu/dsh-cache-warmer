@@ -122,20 +122,26 @@ test('capability rejects wrong model, provider, bounds and attachments before au
   for (const patch of [{ model: OPENROUTER_MODEL }, { provider: 'elsewhere' }, { maxTokens: 9 },
     { messages: [{ role: 'user', content: [{ type: 'image' }] }] },
     { messages: [{ role: 'tool', content: [{ type: 'file' }] }] },
+    { messages: [{ role: 'developer', content: [{ type: 'text', text: 'unsupported role' }] }] },
+    { messages: [{ role: 'user', content: [{ type: 'tool-addition' }] }] },
+    { messages: [{ role: 'user', content: [{ type: 'tool-removal' }] }] },
   ]) await assert.rejects(consume(adapter.stream({ ...optionsFor('openai/gpt-4.1'), ...patch })), /unsupported route\/model|1–8|text context/);
   assert.equal(authReads, 0);
 });
 test('production creation is credential-free and route identity rechecked across auth await', async () => {
   const f = context();
+  // Belt-and-suspenders: even a regression in a route guard cannot dispatch a
+  // production request in this test; the only supplied credential is synthetic.
+  const options = { ...optionsFor('openai/gpt-4.1'), signal: AbortSignal.abort('offline route identity fixture') };
   await assert.rejects(createBoundedOpenRouter(f), /unsupported-model/);
   const adapter = await createBoundedOpenRouter(f, { model: 'openai/gpt-4.1' });
   assert.equal(f.state.authReads, 0);
   f.state.revision++;
-  await assert.rejects(consume(adapter.stream(optionsFor('openai/gpt-4.1'))), /route changed/);
+  await assert.rejects(consume(adapter.stream(options)), /route changed/);
   assert.equal(f.state.authReads, 0);
   const adapter2 = await createBoundedOpenRouter(f, { model: 'openai/gpt-4.1' });
   f.state.resolve = async () => { f.state.route.cacheRetention = 'long'; return { value: 'offline-placeholder' }; };
-  await assert.rejects(consume(adapter2.stream(optionsFor('openai/gpt-4.1'))), /route changed/);
+  await assert.rejects(consume(adapter2.stream(options)), /route changed/);
   assert.equal(f.state.authReads, 1, 'no real credentials or network involved');
 });
 
@@ -170,6 +176,19 @@ test('bounded production serializer applies per-model caps and never retries', a
   assert.equal(received.body.reasoning.effort, 'none');
   assert.ok(output.some((c) => c.type === 'usage' && c.usage.cacheReadTokens === 1024));
   const before = calls;
+  // Simulate serializer drift AFTER catalog admission. The final callback must
+  // reject it before the SDK sends even one request, not just reject metadata.
+  for (const patch of [{ model: 'openai/gpt-4.1' }, { max_completion_tokens: 1000 },
+    { provider: { allow_fallbacks: true } }, { plugins: [{ id: 'web' }] },
+    { reasoning: { max_tokens: 1000 } }, { modalities: ['text', 'image'] }]) {
+    const drifting = { ...local, streamSimple: (model, context, native) => local.streamSimple(model, context, {
+      ...native, onPayload: (payload) => native.onPayload({ ...payload, ...patch }),
+    }) };
+    const guarded = buildBoundedAdapter({ modelId: OPENROUTER_MODEL, catalogProvider: drifting, route: {}, expectedBase: base, resolveApiKey: async () => 'offline-placeholder' });
+    const result = await consume(guarded.stream(options));
+    assert.equal(result.at(-1)?.reason?.kind, 'error', JSON.stringify(result));
+    assert.equal(calls, before, 'bad final payload must never reach loopback');
+  }
   const oversize = await consume(adapter.stream({ ...options, system: 'x'.repeat(MAX_WIRE_BYTES) }));
   assert.equal(oversize.at(-1).reason.kind, 'error');
   assert.equal(calls, before, 'oversize must not reach loopback server');
