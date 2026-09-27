@@ -192,7 +192,7 @@ test('Codex defaults are optional reviewed estimates; unknown tiers and models c
   assert.equal(unknown.ruleSource, 'unknown')
 })
 
-test('OpenRouter never invents a lifetime or cadence; only reviewed transport can warm', () => {
+test('OpenRouter never invents a lifetime or cadence; compatible catalog models can warm', () => {
   for (const model of [OPENROUTER_MODEL, 'anthropic/claude-sonnet-4', 'new/model']) {
     const p = policyFor('openrouter', model)
     assert.equal(p.kind, 'openrouter')
@@ -211,8 +211,8 @@ test('OpenRouter never invents a lifetime or cadence; only reviewed transport ca
     assert.equal(reviewed.cacheTtlMs, 5 * MINUTE)
     assert.equal(decisionDelay(reviewed), 4.5 * MINUTE)
   }
-  const unsupported = policyFor('openrouter', 'anthropic/claude-sonnet-4',
-    settings(row({ provider: 'openrouter', model: 'anthropic/claude-sonnet-4' })))
+  const unsupported = policyFor('openrouter', 'unknown/model',
+    settings(row({ provider: 'openrouter', model: 'unknown/model' })))
   assert.equal(unsupported.cacheTtlMs, 30 * MINUTE)
   assert.equal(unsupported.warmingAllowed, true)
   assert.equal(unsupported.transportSupported, false)
@@ -274,4 +274,13 @@ test('illustrative Codex defaults are frozen concrete canonical rows, not runtim
   }
   assert.throws(() => defaults.push(row()), TypeError)
   assert.throws(() => { defaults[0].cacheMinutes = 999 }, TypeError)
+})
+
+test('model enable toggle preserves the lifetime without overriding unknown TTL guard', () => {
+  const disabled = row({ enabled: false, cacheMinutes: 30 })
+  assert.deepEqual(normalizeModelPolicies([disabled]), [disabled])
+  assert.equal(at(settings(disabled)).warmingAllowed, false)
+  assert.equal(at(settings(disabled)).cacheTtlMs, 30 * MINUTE)
+  assert.equal(at(settings(row({ cacheMinutes: null }))).warmingAllowed, true)
+  assert.equal(decisionDelay(at(settings(row({ cacheMinutes: null })))), null)
 })
