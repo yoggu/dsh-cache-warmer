@@ -6,6 +6,34 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
 
     const route = '/api/dsh-cache-warmer';
+    // Bound the whole read, including response.json(). Aborting fetch alone is
+    // insufficient if an intermediary never settles its promise after abort.
+    function readSettingsJson(url, controller) {
+      let timer, onAbort;
+      const cancelled = new Promise((_, reject) => {
+        onAbort = () => { const error = new Error('Request cancelled'); error.name = 'AbortError'; reject(error); };
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+        if (controller.signal.aborted) onAbort();
+      });
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error('Request timed out'); error.name = 'TimeoutError';
+          reject(error);
+          controller.abort();
+        }, 10000);
+      });
+      const request = Promise.resolve().then(() => {
+        if (controller.signal.aborted) { const error = new Error('Request cancelled'); error.name = 'AbortError'; throw error; }
+        return fetch(url, { credentials: 'include', signal: controller.signal, cache: 'no-store' });
+      }).then(response => {
+        if (!response.ok) throw new Error('Request failed');
+        return response.json();
+      });
+      return Promise.race([request, deadline, cancelled]).finally(() => {
+        clearTimeout(timer);
+        controller.signal.removeEventListener('abort', onAbort);
+      });
+    }
     const readTime = (value) => {
       if (typeof value === 'number' && Number.isFinite(value)) return value;
       if (typeof value !== 'string' || !value.trim()) return NaN;
@@ -50,7 +78,7 @@ window.__ModuleLoader__.load({
       const zh = String(locale || 'en').toLowerCase().startsWith('zh');
       return zh ? {
         unknownTtl: '缓存时间 —', ttl: '预计剩余缓存时间', remaining: '缓存时间 ~',
-        toggle: '保持缓存活跃', status: '上下文缓存', phase: '阶段',
+        toggle: '保持缓存活跃', status: '缓存保温', phase: '阶段',
         reason: '说明', lastHit: '上次命中的缓存令牌', lastHitAt: '上次缓存命中', lastWarm: '上次保温请求',
         observationOnly: '仅供观察', unknown: '有效期尚未确认',
         inactive: '未启用', active: '活跃', idle: '空闲', running: '运行中',
@@ -64,7 +92,7 @@ window.__ModuleLoader__.load({
         windowClosed: '已超出设定的活跃时间窗口。',
       } : {
         unknownTtl: 'Cache time —', ttl: 'Estimated cache time remaining', remaining: 'Cache time ~',
-        toggle: 'Keep cache warm', status: 'Context cache', phase: 'Phase',
+        toggle: 'Keep cache warm', status: 'Cache warming', phase: 'Phase',
         reason: 'Note', lastHit: 'Last cached tokens', lastHitAt: 'Last cache hit', lastWarm: 'Last warm request',
         observationOnly: 'Observation only', unknown: 'No reliable TTL',
         inactive: 'Inactive', active: 'Active', idle: 'Idle', running: 'Running',
@@ -77,6 +105,82 @@ window.__ModuleLoader__.load({
         noStorage: 'Durable preferences are unavailable; warming is disabled.',
         noConsent: 'Warming is not enabled for this session.', windowClosed: 'The configured activity window has ended.',
       };
+    }
+
+    // Keep the summary independent from monetary metrics and host prose. Older
+    // hosts may omit warmingState; never infer a scheduled request from "ready" alone.
+    function warmingSummary(status, { loading, error, locale, now }) {
+      const zh = String(locale).toLowerCase().startsWith('zh');
+      const states = zh ? {
+        scheduled: '已安排', warming: '保温中', waiting: '等待中', skipped: '已跳过',
+        stopped: '已停止', disabled: '已停用', unavailable: '不可用',
+      } : {
+        scheduled: 'Scheduled', warming: 'Warming', waiting: 'Waiting', skipped: 'Skipped',
+        stopped: 'Stopped', disabled: 'Disabled', unavailable: 'Unavailable',
+      };
+      const descriptions = zh ? {
+        scheduled: '发送前会再次检查条件。', warming: '后台请求正在刷新缓存。',
+        waiting: '正在等待满足保温条件。', skipped: '本次评估未满足保温条件。',
+        stopped: '自动保温已停止；等待新的实际请求。', disabled: '此会话尚未启用自动保温。',
+        unavailable: '当前无法获取保温状态。',
+      } : {
+        scheduled: 'Conditions are checked again before sending.', warming: 'A background request is refreshing the cache.',
+        waiting: 'Waiting for warming conditions to be met.', skipped: 'Warming conditions were not met for this decision.',
+        stopped: 'Warming has stopped until a new real request.', disabled: 'Warming is not enabled for this session.',
+        unavailable: 'Warming status is currently unavailable.',
+      };
+      const reasons = zh ? {
+        unsupported: '此线路暂无兼容的保温传输。', 'unknown-lifetime': '尚未设置缓存有效期估计；仅供观察。',
+        'policy-disabled': '此模型的缓存策略已禁止保温。', 'retention-disabled': '此线路已停用提示缓存保留。',
+        'unknown-pricing': '模型价格未知，无法检查保温收益。', 'no-cache-evidence': '等待实际请求报告缓存命中。',
+        'no-context': '等待新的已完成请求，以获取当前上下文。', disabled: descriptions.disabled,
+        'request-in-flight': '等待当前请求完成。',
+        'request-identity-unavailable': '无法识别当前请求，已停用自动保温。',
+        'window-ended': '距上次实际请求的保温窗口已结束。', 'window-too-short': '剩余保温窗口不足以安排下一次刷新。',
+        'insufficient-savings': '预计节省不足。',
+        'cache-elapsed': '预计缓存有效期已过；等待实际请求。', stopped: '因错误、未命中、取消或上下文变化而停止。',
+        'no-storage': '持久化设置或费用记录不可用，已停止保温。',
+        'transport-pending': '等待上一次后台请求完成关闭。', 'decision-pending': '正在等待下一次保温评估。',
+        'idle-probability-zero': '继续对话概率设为零，已停用空闲保温。',
+        'session-unavailable': '当前会话不可用。', 'economics-missing-pricing': '缺少价格信息，无法检查保温收益。',
+        ready: descriptions.waiting, warming: descriptions.warming,
+      } : {
+        unsupported: 'No compatible warming transport is available for this route.',
+        'unknown-lifetime': 'No cache lifetime estimate is configured; observation only.',
+        'policy-disabled': 'The model cache policy disables warming.', 'retention-disabled': 'Prompt cache retention is disabled for this route.',
+        'unknown-pricing': 'Model pricing is unknown, so the cost check cannot run.', 'no-cache-evidence': 'Waiting for a real request to report a cache hit.',
+        'no-context': 'Waiting for a completed real request with current context.', disabled: descriptions.disabled,
+        'request-in-flight': 'Waiting for the current request to finish.',
+        'request-identity-unavailable': 'The current request cannot be identified, so warming is disabled.',
+        'window-ended': 'The warming window after the last real request has ended.',
+        'window-too-short': 'The remaining warming window is too short for another refresh.',
+        'insufficient-savings': 'Expected savings are too low.',
+        'cache-elapsed': 'The estimated cache lifetime has elapsed; waiting for a real request.',
+        stopped: 'Warming stopped after an error, miss, cancellation or context change.',
+        'no-storage': 'Durable preferences or usage records are unavailable, so warming has stopped.',
+        'transport-pending': 'Waiting for the previous background request to finish closing.', 'decision-pending': 'Waiting for the next warming decision.',
+        'idle-probability-zero': 'Idle warming is disabled by the continuation probability setting.',
+        'session-unavailable': 'The current session is unavailable.', 'economics-missing-pricing': 'Pricing is missing, so the cost check cannot run.',
+        ready: descriptions.waiting, warming: descriptions.warming,
+      };
+      if (loading) return { state: 'unavailable', label: states.unavailable, description: zh ? '正在加载保温状态。' : 'Loading warming status.' };
+      if (error === 'load' || !status || typeof status !== 'object' || Array.isArray(status)) {
+        return { state: 'unavailable', label: states.unavailable, description: error === 'load'
+          ? (zh ? '无法加载保温状态，请稍后重试。' : 'Could not load warming status; try again shortly.') : descriptions.unavailable };
+      }
+      const reason = status.reasonCode;
+      let state = Object.hasOwn(states, status.warmingState) ? status.warmingState : null;
+      if (!state) {
+        if (status.warming === true) state = 'warming';
+        else if (status.enabled === false || ['disabled', 'policy-disabled', 'retention-disabled', 'idle-probability-zero'].includes(reason)) state = 'disabled';
+        else if (status.supported === false || ['unsupported', 'no-storage', 'unknown-lifetime', 'unknown-pricing', 'request-identity-unavailable', 'session-unavailable', 'economics-missing-pricing'].includes(reason)) state = 'unavailable';
+        else if (['stopped', 'window-ended', 'window-too-short', 'cache-elapsed'].includes(reason)) state = 'stopped';
+        else if (reason === 'insufficient-savings') state = 'skipped';
+        else if (reason === 'ready' && readTime(status.nextRefreshAt) > now) state = 'scheduled';
+        else state = typeof status.warming === 'boolean' || typeof reason === 'string' || typeof status.enabled === 'boolean' ? 'waiting' : 'unavailable';
+      }
+      const description = state === 'scheduled' || state === 'warming' ? descriptions[state] : reasons[reason] || descriptions[state];
+      return { state, label: states[state], description };
     }
 
     function formatDuration(ms, labels) {
@@ -293,33 +397,19 @@ window.__ModuleLoader__.load({
         return formatted ? h('div', { key: name, style: rowStyle },
           h('span', { style: mutedStyle }, name), h('span', { style: textStyle }, formatted)) : null;
       };
-      const phase = status && status.phase;
-      const stateLabel = status && status.status;
-      const phaseLabel = labels[phase] || phase;
-      const stateText = labels[stateLabel] || stateLabel;
       const hitTokens = finiteNumber(status && status.lastCacheHitTokens);
-      const reason = status && typeof status.reason === 'string' ? status.reason : '';
-      const zh = locale.startsWith('zh');
-      const reasonTexts = zh ? {
-        unsupported: '此线路暂无兼容的保温传输。', 'unknown-lifetime': '此模型未配置缓存有效期；仅供观察。',
-        'policy-disabled': '此模型的缓存策略已禁止保温。', 'retention-disabled': '此线路已停用提示缓存保留。',
-        'unknown-pricing': '模型价格未知，跳过自动保温。', 'no-cache-evidence': '等待实际请求报告缓存命中。',
-        'no-context': '等待新的已完成请求，以获取当前上下文。', disabled: '此会话尚未启用自动保温。',
-        'request-in-flight': '实际请求正在进行中；保温将等待请求完成。',
-        'request-identity-unavailable': '无法解析当前 Harness 的请求标识；已停用自动保温。',
-        'window-ended': '距上次实际请求的保温窗口已结束。', 'insufficient-savings': '预计收益低于 0.05 美元，跳过刷新。',
-        'cache-elapsed': '预计缓存有效期已过；等待实际请求。', stopped: '因错误、未命中、取消或上下文变化而停止。',
-        'no-storage': '持久化设置或费用记录不可用，已停止保温。',
-      } : {};
-      const routeReason = reasonTexts[status?.reasonCode] || reason || labels.unsupported;
-      const reasonText = reasonTexts[status?.reasonCode] || reason;
+      const zh = locale.toLowerCase().startsWith('zh');
+      const summary = warmingSummary(status, { loading, error, locale, now });
       const elapsedText = zh ? '预计有效期已过（不代表缓存已删除）' : 'Estimated lifetime elapsed (not confirmed eviction)';
       const tooltipText = hasExpiry ? (remainingMs > 0 ? labels.ttl : elapsedText)
         : (zh ? '缓存有效期未知' : 'Cache lifetime unknown');
       const money = value => Number.isFinite(value) ? `${value < 0 ? '−' : ''}$${Math.abs(value).toFixed(3)}` : '—';
-      const metric = (name, value) => h('div', { key: name, style: rowStyle },
+      const metric = (name, value, title) => h('div', { key: name, style: rowStyle, title },
         h('span', { style: mutedStyle }, name), h('span', { style: textStyle }, value));
-      const errorText = error === 'save' ? labels.saveFailed : error === 'load' ? labels.failed : '';
+      const lifetimeText = hasTtl ? formatDuration(ttlMs, labels) : (zh ? '未知' : 'Unknown');
+      const remainingText = hasExpiry ? (remainingMs > 0 ? `~${Math.ceil(remainingMs / 60000)} ${labels.minutes}` : (zh ? '已过期' : 'Elapsed'))
+        : (zh ? '未知' : 'Unknown');
+      const errorText = error === 'save' ? labels.saveFailed : '';
       const showRing = hasExpiry;
 
       return h('span', {
@@ -359,15 +449,16 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dsh-cache-warmer-label', style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, pillText)),
         h(PillTooltip, {anchor:triggerRef, text:tooltipText, visible:hover && !open, id:tipId}),
         open && createPortal(h('div', { className: 'dsh-cache-warmer-panel', ref: panelRef, role: 'dialog', 'aria-label': labels.status, style: popoverStyle },
-          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-            marginBottom: 8, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' } },
-            h('span', null, labels.status),
-            h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontWeight: 400 } },
-              loading ? labels.loading : !supported ? labels.observationOnly : stateText || labels.unavailable)),
-          h('div', { 'aria-hidden': true, style: { borderTop: '.5px solid var(--dsw-alias-border-l2)', marginBottom: 10 } }),
-          h('div', { style: { color: 'var(--dsw-alias-label-tertiary)' } }, hasExpiry ? (remainingMs > 0 ? `${labels.ttl}: ${Math.ceil(remainingMs / 60000)} ${labels.minutes}` : elapsedText) : labels.unknown),
+          h('div', { className: 'dsh-cache-warmer-header',
+            style: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, marginBottom: 4 } },
+            h('h3', { className: 'dsh-cache-warmer-title',
+              style: { margin: 0, fontSize: 13, lineHeight: '20px', fontWeight: 500, color: 'var(--dsw-alias-label-primary)' } }, labels.status),
+            h('span', { className: 'dsh-cache-warmer-state', 'data-warming-state': summary.state,
+              style: { flexShrink: 0, fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-secondary)' } }, summary.label)),
+          h('div', { className: 'dsh-cache-warmer-description', role: error === 'load' ? 'alert' : 'status',
+            style: { marginBottom: 12, color: 'var(--dsw-alias-label-secondary)', fontSize: 12, lineHeight: '20px', overflowWrap: 'anywhere' } }, summary.description),
           h('label', {
-            style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, cursor: supported ? 'pointer' : 'not-allowed' },
+            style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 13, lineHeight: '20px', cursor: supported || enabled ? 'pointer' : 'not-allowed' },
           },
             h('input', {
               className: 'dsh-cache-warmer-check', type: 'checkbox', checked: enabled,
@@ -376,14 +467,9 @@ window.__ModuleLoader__.load({
               style: { accentColor: 'var(--dsw-alias-brand-primary)' },
             }),
             h('span', { style: textStyle }, labels.toggle)),
-          !supported && h('div', { style: { ...mutedStyle, paddingTop: 8, overflowWrap: 'anywhere' } },
-            routeReason),
-          supported && phase != null && h('div', { style: rowStyle },
-            h('span', { style: mutedStyle }, labels.phase), h('span', { style: textStyle }, phaseLabel)),
-          status?.ruleSource && h('div', { style: { ...mutedStyle, paddingTop: 8 } },
-            status.ruleSource === 'custom' ? (zh ? '自定义有效期假设' : 'Custom lifetime assumption')
-              : status.ruleSource === 'codex-default' ? (zh ? 'Codex 默认估计' : 'Codex estimated default')
-              : (zh ? '有效期未知' : 'Lifetime unknown')),
+          h('div', { 'aria-hidden': true, style: { borderTop: '.5px solid var(--dsw-alias-border-l2)', marginBottom: 4 } }),
+          metric(zh ? '剩余时间' : 'Time remaining', remainingText, hasExpiry && remainingMs === 0 ? elapsedText : undefined),
+          metric(zh ? '缓存有效期' : 'Cache lifetime', lifetimeText),
           Number.isFinite(hitTokens) && h('div', { style: rowStyle },
             h('span', { style: mutedStyle }, labels.lastHit), h('span', { style: textStyle }, hitTokens.toLocaleString(locale))),
           timeLabel(labels.lastHitAt, status && status.lastCacheHitAt),
@@ -398,10 +484,8 @@ window.__ModuleLoader__.load({
             metric(zh ? '保温请求次数' : 'Warm requests', String(status.warmUsage.attempts)),
             metric(zh ? '保温费用估计' : 'Warm usage estimate', `${money(status.warmUsage.usd)}${status.warmUsage.unpriced ? (zh ? ' · 部分' : ' · partial') : ''}`)),
           status?.decision?.subscription && h('div', { style: { ...mutedStyle, paddingTop: 8 } },
-            zh ? '按 API 等价价格估计，并非订阅配额。保温会消耗用量；Codex 不保证输出令牌上限。'
-              : 'API-equivalent estimate, not subscription allowance. Warming consumes usage; Codex has no guaranteed output cap.'),
-          reason && supported && h('div', { style: { ...mutedStyle, paddingTop: 8, overflowWrap: 'anywhere' } },
-            h('span', { style: textStyle }, `${labels.reason}: `), reasonText),
+            zh ? '金额为 API 等价估计，并非账单或订阅配额。保温会消耗用量。'
+              : 'Dollars are API-equivalent estimates, not a bill or subscription quota. Warming consumes usage.'),
           errorText && h('div', {
             role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', paddingTop: 8 },
           }, errorText),
@@ -426,6 +510,8 @@ window.__ModuleLoader__.load({
       // Catalog metadata never enters the editable settings or a POST body.
       const editable = value => ({ autoWarmNewChats: value.autoWarmNewChats, activeMinutes: value.activeMinutes,
         idleMinutes: value.idleMinutes, useCodexDefaults: value.useCodexDefaults !== false,
+        minExpectedBenefitUsd: value.minExpectedBenefitUsd === undefined ? 0.05 : value.minExpectedBenefitUsd,
+        idleContinuationPercent: value.idleContinuationPercent === undefined ? 15 : value.idleContinuationPercent,
         modelPolicies: (value.modelPolicies || []).map(row => ({ provider: row.provider, model: row.model,
           enabled: row.enabled, cacheMinutes: row.cacheMinutes })) });
       const t = zh ? {
@@ -436,6 +522,13 @@ window.__ModuleLoader__.load({
         idleHelp: '智能体空闲时，允许保温至上次实际模型请求后的指定分钟数，并非从运行结束时重新计时。设为 0 可停用空闲保温。',
         windowHelp: '这是允许保温的时间范围，不是刷新间隔或缓存有效期。实际刷新时间由下方模型的有效期估计决定；保温请求不会延长窗口。',
         windowExample: '例如：空闲窗口为 30 分钟，上次实际请求在 14:00，则保温最迟于 14:30 停止；即使运行在 14:10 才结束，也不会延后。',
+        advanced: '高级 / 费用检查', benefit: '最低预计净收益（美元）', probability: '空闲时继续对话的概率（%）',
+        benefitHelp: '扣除预计刷新费用后，净收益必须达到此门槛（0–1000 美元）。降低门槛可能增加保温请求和用量。',
+        probabilityHelp: '空闲时再次使用缓存的本地概率假设（整数 0–100%）。提高概率可能增加保温和用量；设为 0 会阻止空闲保温。',
+        costHelp: '这些值是本地决策假设，不是提供商的保证。运行中继续对话的概率固定为 100%；其他安全检查仍然生效。',
+        codexCostHelp: 'Codex 的美元金额是 API 等价估计，并非账单或订阅配额。保温仍会消耗用量。',
+        invalidSettings: '窗口需为 0–1440 的整数分钟；净收益门槛需为 0–1000 的有限数字；空闲概率需为 0–100 的整数。必填项不能留空。',
+        loadTimeout: '设置加载超时，请重试。', modelsTimeout: '模型加载超时。已保留现有列表和自定义规则，请重试。',
         loadError: '无法加载设置。', saveError: '保存失败；未保存的修改已保留。', save: '保存', saving: '保存中…', loading: '加载中…',
         models: '模型缓存策略', search: '搜索模型或提供商', provider: '提供商', all: '所有提供商', refresh: '刷新模型', retry: '重试', more: '加载更多',
         modelError: '无法发现此提供商的模型。已保留自定义规则。', timeout: '此提供商的模型发现超时。已保留自定义规则。',
@@ -454,6 +547,13 @@ window.__ModuleLoader__.load({
         idleHelp: 'While the agent is idle, allow warming until this many minutes after its last real model request—not after the run ends. Set to 0 to disable idle warming.',
         windowHelp: 'These are time windows, not refresh intervals or cache lifetimes. Refresh timing comes from the model’s lifetime estimate below. Warm requests never extend either window.',
         windowExample: 'Example: with a 30-minute idle window and a last real request at 14:00, warming stops by 14:30—even if the run finishes at 14:10.',
+        advanced: 'Advanced / Cost checks', benefit: 'Minimum expected net benefit (USD)', probability: 'Idle continuation probability (%)',
+        benefitHelp: 'After the estimated refresh cost, the net benefit must reach this threshold (USD 0–1000). A lower threshold can mean more warming and usage.',
+        probabilityHelp: 'Local chance of reusing the cache while idle (whole percent, 0–100). A higher probability can mean more warming and usage; 0 blocks idle warming.',
+        costHelp: 'These are local decision assumptions, not provider guarantees. Continuation probability while running is fixed at 100%; other safety checks still apply.',
+        codexCostHelp: 'Codex dollar amounts are API-equivalent estimates, not a bill or subscription quota. Warming still consumes usage.',
+        invalidSettings: 'Windows require whole minutes from 0–1440; the benefit threshold requires a finite number from 0–1000; idle probability requires a whole percent from 0–100. Required fields cannot be blank.',
+        loadTimeout: 'Settings took too long to load. Please retry.', modelsTimeout: 'Models took too long to load. Existing models and overrides are preserved; please retry.',
         loadError: 'Could not load settings.', saveError: 'Save failed; unsaved changes are preserved.', save: 'Save', saving: 'Saving …', loading: 'Loading …',
         models: 'Model cache policies', search: 'Search models or providers', provider: 'Provider', all: 'All providers', refresh: 'Refresh models', retry: 'Retry', more: 'Load more',
         modelError: 'Model discovery failed for this provider. Overrides are preserved.', timeout: 'Model discovery timed out for this provider. Overrides are preserved.',
@@ -478,23 +578,22 @@ window.__ModuleLoader__.load({
         let active = true;
         const controller = new AbortController();
         setError('');
-        fetch(`${route}?scope=settings`, { credentials: 'include', signal: controller.signal })
-          .then(response => { if (!response.ok) throw new Error('settings'); return response.json(); })
+        readSettingsJson(`${route}?scope=settings`, controller)
           .then(value => { if (active) { const settings = editable(value); setValues(settings); setDraft(settings); } })
-          .catch(() => { if (active) setError('load'); });
+          .catch(cause => { if (active) setError(cause.name === 'TimeoutError' ? 'load-timeout' : 'load'); });
         return () => { active = false; controller.abort(); };
       }, [settingsRequest]);
       React.useEffect(() => {
         let active = true;
         const controller = new AbortController();
         setModelsLoading(true);
-        fetch(`${route}?scope=models`, { credentials: 'include', signal: controller.signal })
-          .then(response => { if (!response.ok) throw new Error('models'); return response.json(); })
+        readSettingsJson(`${route}?scope=models`, controller)
           .then(value => {
             if (!value || !Array.isArray(value.providers)) throw new Error('models');
             if (active) setCatalog(value);
           })
-          .catch(() => { if (active) setCatalog({ providers: [], error: 'provider-discovery-failed' }); })
+          .catch(cause => { if (active) setCatalog(previous => ({ ...previous,
+            error: cause.name === 'TimeoutError' ? 'model-request-timeout' : 'provider-discovery-failed' })); })
           .finally(() => { if (active) setModelsLoading(false); });
         return () => { active = false; controller.abort(); };
       }, [modelsRequest]);
@@ -512,8 +611,12 @@ window.__ModuleLoader__.load({
         typeof row.provider === 'string' && row.provider.length <= 128 && /^[A-Za-z0-9_.-]+$/.test(row.provider)
         && typeof row.model === 'string' && row.model.length > 0 && row.model.length <= 256 && row.model === row.model.trim()
         && !/[*?\[\]{}]/.test(row.model) && typeof row.enabled === 'boolean' && validMinutes(row.cacheMinutes));
-      const valid = draft && validRows && Number.isInteger(draft.activeMinutes) && draft.activeMinutes >= 0 && draft.activeMinutes <= 1440
-        && Number.isInteger(draft.idleMinutes) && draft.idleMinutes >= 0 && draft.idleMinutes <= 1440;
+      const validSettings = draft && typeof draft.autoWarmNewChats === 'boolean' && typeof draft.useCodexDefaults === 'boolean'
+        && Number.isInteger(draft.activeMinutes) && draft.activeMinutes >= 0 && draft.activeMinutes <= 1440
+        && Number.isInteger(draft.idleMinutes) && draft.idleMinutes >= 0 && draft.idleMinutes <= 1440
+        && Number.isFinite(draft.minExpectedBenefitUsd) && draft.minExpectedBenefitUsd >= 0 && draft.minExpectedBenefitUsd <= 1000
+        && Number.isInteger(draft.idleContinuationPercent) && draft.idleContinuationPercent >= 0 && draft.idleContinuationPercent <= 100;
+      const valid = validSettings && validRows;
       const save = async () => {
         if (!valid || busy) return;
         setBusy(true); setError('');
@@ -582,11 +685,11 @@ window.__ModuleLoader__.load({
       const settingText = (key, title, help) => h('span', { className: 'dsh-cache-settings-copy' },
         h('span', { className: 'dsh-cache-settings-label' }, title),
         h('span', { className: 'dsh-cache-settings-help', id: `${helpId}-${key}` }, help));
-      const field = (key, title, help) => h('label', { className: 'dsh-cache-settings-row' },
-        settingText(key, title, help), h('input', { type: 'number', min: 0, max: 1440, step: 1,
+      const field = (key, title, help, max = 1440, step = 1) => h('label', { className: 'dsh-cache-settings-row' },
+        settingText(key, title, help), h('input', { type: 'number', min: 0, max, step,
           className: 'dsh-cache-settings-input', disabled: busy, value: draft[key], 'aria-label': title,
           'aria-describedby': `${helpId}-${key}`,
-          onChange: event => set(key, event.target.value === '' ? '' : Number(event.target.value)),
+          onChange: event => set(key, event.target.value.trim() === '' ? '' : Number(event.target.value)),
         }));
       const renderModel = model => {
         const row = effective(model);
@@ -624,9 +727,17 @@ window.__ModuleLoader__.load({
               onClick: () => set('autoWarmNewChats', !draft.autoWarmNewChats) }, h('span', { className: 'dsh-cache-settings-thumb', 'aria-hidden': true }))),
           field('activeMinutes', t.active, t.activeHelp), field('idleMinutes', t.idle, t.idleHelp),
           h('div', { className: 'dsh-cache-settings-window-note' },
-            h('p', null, t.windowHelp), h('p', null, t.windowExample)))
-          : h('div', { className: 'dsh-cache-policy-note', role: error === 'load' ? 'alert' : 'status' }, error === 'load' ? t.loadError : t.loading,
-            error === 'load' && button(t.retry, () => setSettingsRequest(n => n + 1))),
+            h('p', null, t.windowHelp), h('p', null, t.windowExample)),
+          h('details', { className: 'dsh-cache-settings-advanced' },
+            h('summary', null, t.advanced),
+            h('p', { className: 'dsh-cache-policy-note' }, t.costHelp),
+            field('minExpectedBenefitUsd', t.benefit, t.benefitHelp, 1000, 0.001),
+            field('idleContinuationPercent', t.probability, t.probabilityHelp, 100),
+            h('p', { className: 'dsh-cache-policy-note' }, t.codexCostHelp)),
+          !validSettings && h('p', { role: 'alert', className: 'dsh-cache-settings-error' }, t.invalidSettings))
+          : h('div', { className: 'dsh-cache-policy-note', role: error === 'load' || error === 'load-timeout' ? 'alert' : 'status' },
+            error === 'load-timeout' ? t.loadTimeout : error === 'load' ? t.loadError : t.loading,
+            (error === 'load' || error === 'load-timeout') && button(t.retry, () => setSettingsRequest(n => n + 1))),
         h('section', { className: 'dsh-cache-policy-section', 'aria-label': t.models },
           h('div', { className: 'dsh-cache-policy-actions' }, h('h3', null, t.models),
             button(t.refresh, () => setModelsRequest(n => n + 1), modelsLoading)),
@@ -641,7 +752,7 @@ window.__ModuleLoader__.load({
                 onChange: event => { setProviderFilter(event.target.value); setLimit(25); } },
               h('option', { value: '' }, t.all), allGroups.map(group => h('option', { key: group.id, value: group.id }, `${group.name} (${group.models.length})`))))),
           modelsLoading && h('p', { className: 'dsh-cache-policy-note', role: 'status' }, t.loading),
-          catalog.error && h('p', { className: 'dsh-cache-settings-error', role: 'alert' }, t.providerError,
+          catalog.error && h('p', { className: 'dsh-cache-settings-error', role: 'alert' }, catalog.error === 'model-request-timeout' ? t.modelsTimeout : t.providerError,
             button(t.retry, () => setModelsRequest(n => n + 1), modelsLoading)),
           h('p', { className: 'dsh-cache-policy-note', role: 'status' }, zh ? `显示 ${displayed} / ${matched} 个匹配模型，共 ${total} 个；自定义 ${rows.length} / 100`
             : `Showing ${displayed} of ${matched} matching models · ${total} total · ${rows.length}/100 overrides`),
@@ -683,6 +794,9 @@ window.__ModuleLoader__.load({
 .dsh-cache-settings-window-note{margin:12px 0 16px;padding:12px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
 .dsh-cache-settings-window-note p{margin:0}
 .dsh-cache-settings-window-note p+p{margin-top:8px}
+.dsh-cache-settings-advanced{margin:12px 0;border-top:.5px solid var(--dsw-alias-border-l2);padding-top:12px}
+.dsh-cache-settings-advanced summary{cursor:pointer;font-size:14px;line-height:22px;font-weight:500}
+.dsh-cache-settings-advanced summary:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 .dsh-cache-settings-input{box-sizing:border-box;width:88px;flex:none;height:34px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font:inherit;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary)}
 .dsh-cache-settings-input:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
 .dsh-cache-policy-section{margin-top:12px;border-top:.5px solid var(--dsw-alias-border-l2);padding-top:16px}

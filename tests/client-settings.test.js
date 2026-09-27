@@ -6,7 +6,8 @@ import vm from 'node:vm'
 const model = (id, overrides = {}) => ({ id, name: id, defaultCacheMinutes: null, transportSupported: true, reasonCode: null, ...overrides })
 const provider = (id, models, overrides = {}) => ({ id, name: id, models, ...overrides })
 const policy = (provider, model, cacheMinutes, enabled = false) => ({ provider, model, enabled, cacheMinutes })
-const base = { autoWarmNewChats: false, activeMinutes: 60, idleMinutes: 30, useCodexDefaults: true, modelPolicies: [] }
+const base = { autoWarmNewChats: false, activeMinutes: 60, idleMinutes: 30, useCodexDefaults: true,
+  minExpectedBenefitUsd: 0.05, idleContinuationPercent: 15, modelPolicies: [] }
 const codex = { providers: [provider('codex-business', [model('gpt-5', { name: 'GPT 5', defaultCacheMinutes: 30 })])] }
 const openrouter = { providers: [provider('openrouter', [model('deepseek/flash')])] }
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
@@ -14,8 +15,9 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a, b)
 // Run real component hooks/effects and request handlers in a VM, without importing
 // private UI packages, accessing the browser, or issuing any network requests.
 function fixture({ locale = 'en', settings = base, models = openrouter } = {}) {
-  const state = [], effects = [], pending = [], posts = [], requests = [], registrations = []
-  let cursor = 0, effectCursor = 0, plugin, component
+  const state = [], effects = [], pending = [], posts = [], requests = [], registrations = [], styles = []
+  let cursor = 0, effectCursor = 0, plugin, component, clock = 0, timerId = 0
+  const timers = new Map()
   let settingsResponse = settings, modelsResponse = models, postResponse
   const React = {
     createElement: (type, props, ...children) => ({ type, props: { ...props, children: children.flat(Infinity).filter(x => x !== null && x !== false && x !== undefined) } }),
@@ -34,6 +36,9 @@ function fixture({ locale = 'en', settings = base, models = openrouter } = {}) {
   vm.runInNewContext(readFileSync(new URL('../client.js', import.meta.url), 'utf8'), {
     window: { __ModuleLoader__: { load: module => { plugin = module.factory(name => name === 'react' ? React : {}) } } },
     AbortController,
+    setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { at: clock + delay, callback }); return id },
+    clearTimeout: id => timers.delete(id),
+    document: { createElement: () => ({ dataset: {}, remove() {} }), head: { appendChild: style => styles.push(style.textContent) } },
     fetch: async (url, options = {}) => {
       requests.push({ url, options })
       let response
@@ -46,10 +51,11 @@ function fixture({ locale = 'en', settings = base, models = openrouter } = {}) {
       if (typeof response === 'function') response = response()
       response = await response
       if (response instanceof Error) throw response
+      if (typeof response?.json === 'function') return response
       return { ok: true, json: async () => structuredClone(response) }
     },
   })
-  const ctx = { locale: { getLocale: () => locale }, effect: () => {},
+  const ctx = { locale: { getLocale: () => locale }, effect: callback => callback(),
     slots: { inject: (_name, register) => register(), register: (options, value) => {
       registrations.push(options)
       if (options.name === 'plugins.bundle.config') component = value
@@ -69,12 +75,17 @@ function fixture({ locale = 'en', settings = base, models = openrouter } = {}) {
   const change = (label, value) => { const node = byLabel(label); assert.ok(node, label); node.props.onChange({ target: { value } }) }
   const click = label => { const node = button(label); assert.ok(node, label); assert.equal(Boolean(node.props.disabled), false, label); return node.props.onClick() }
   const textOf = node => typeof node === 'object' && node ? node.props.children.map(textOf).join(' ') : String(node ?? '')
-  const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); return render() }
+  const flush = async () => { for (let i = 0; i < 24; i++) await Promise.resolve(); return render() }
+  const tick = async ms => {
+    clock += ms
+    for (const [id, timer] of [...timers]) if (timer.at <= clock) { timers.delete(id); timer.callback() }
+    return flush()
+  }
   const lifetime = (id, lang = locale) => byLabel(`${lang === 'zh' ? '预计缓存有效期（分钟）' : 'Estimated cache lifetime (minutes)'} ${id}`)
   const toggle = id => byLabel(`${locale === 'zh' ? '允许保温' : 'Allow warming'} ${id}`)
   const cards = () => all().filter(node => node.props['data-model'])
   render()
-  return { render, all, byLabel, save, button, change, click, text: () => textOf(render()), flush, lifetime, toggle, cards, posts, requests, registrations,
+  return { render, all, byLabel, save, button, change, click, text: () => textOf(render()), flush, tick, timers, lifetime, toggle, cards, posts, requests, registrations, styles,
     setModels: value => { modelsResponse = value }, setSettings: value => { settingsResponse = value }, setPost: value => { postResponse = value },
     unmount: () => effects.forEach(effect => effect.cleanup?.()) }
 }
@@ -86,7 +97,7 @@ for (const locale of ['en', 'zh']) test(`one numeric lifetime and independent al
   assert.equal(f.lifetime(id).props.value, '')
   assert.match(f.lifetime(id).props.className, /dsh-cache-policy-minutes/)
   assert.equal(f.toggle(id).props.role, 'switch')
-  assert.equal(f.all().filter(node => node.type === 'input' && node.props.type === 'number').length, 3)
+  assert.equal(f.all().filter(node => node.type === 'input' && node.props.type === 'number').length, 5)
   assert.equal(f.all().filter(node => node.props.role === 'switch').length, 2, 'new-chat and per-model native switches')
   assert.equal(f.all().filter(node => node.props.type === 'checkbox').length, 0, 'model uses native switch rather than checkbox')
   assert.ok(!f.all().some(node => node.type === 'input' && node.props.type === 'text'), 'no manual IDs')
@@ -282,9 +293,9 @@ for (const locale of ['en', 'zh']) test(`settings explain default opt-in and req
   const f = fixture({ locale })
   await f.flush()
   const helpers = f.all().filter(n => n.props.className === 'dsh-cache-settings-help')
-  assert.equal(helpers.length, 3)
+  assert.equal(helpers.length, 5)
   const described = f.all().filter(n => n.props['aria-describedby'])
-  assert.equal(described.length, 3)
+  assert.equal(described.length, 5)
   for (const control of described) assert.ok(helpers.some(n => n.props.id === control.props['aria-describedby']))
   assert.match(f.text(), /14:00/)
   assert.match(f.text(), /14:30/)
@@ -293,9 +304,167 @@ for (const locale of ['en', 'zh']) test(`settings explain default opt-in and req
   assert.match(f.text(), locale === 'zh' ? /不会改变已有对话或子智能体对话/ : /Existing chats and subagent chats are unchanged/)
 })
 
+for (const locale of ['en', 'zh']) test(`collapsed plugin cost checks explain assumptions and save canonical values (${locale})`, async () => {
+  const modelPolicies = [policy('saved', 'current-rule', 45, true)]
+  const f = fixture({ locale, settings: { ...base, modelPolicies }, models: codex })
+  await f.flush()
+  const benefit = locale === 'zh' ? '最低预计净收益（美元）' : 'Minimum expected net benefit (USD)'
+  const probability = locale === 'zh' ? '空闲时继续对话的概率（%）' : 'Idle continuation probability (%)'
+  const details = f.all().filter(node => node.type === 'details')
+  assert.equal(details.length, 1)
+  assert.ok(!details[0].props.open, 'native details starts collapsed')
+  assert.equal(details[0].props.children[0].type, 'summary')
+  assert.deepEqual(details[0].props.children[0].props.children, [locale === 'zh' ? '高级 / 费用检查' : 'Advanced / Cost checks'])
+  assert.equal(f.byLabel(benefit).props.value, 0.05)
+  assert.equal(f.byLabel(benefit).props.step, 0.001)
+  assert.equal(f.byLabel(benefit).props.min, 0)
+  assert.equal(f.byLabel(benefit).props.max, 1000)
+  assert.equal(f.byLabel(probability).props.value, 15)
+  assert.equal(f.byLabel(probability).props.step, 1)
+  assert.equal(f.byLabel(probability).props.min, 0)
+  assert.equal(f.byLabel(probability).props.max, 100)
+  assert.match(f.text(), locale === 'zh' ? /降低门槛可能增加保温请求和用量/ : /lower threshold can mean more warming and usage/)
+  assert.match(f.text(), locale === 'zh' ? /提高概率可能增加保温和用量/ : /higher probability can mean more warming and usage/)
+  assert.match(f.text(), locale === 'zh' ? /设为 0 会阻止空闲保温/ : /0 blocks idle warming/)
+  assert.match(f.text(), locale === 'zh' ? /固定为 100%/ : /fixed at 100%/)
+  assert.match(f.text(), locale === 'zh' ? /本地决策假设/ : /local decision assumptions/)
+  assert.match(f.text(), locale === 'zh' ? /API 等价估计，并非账单或订阅配额/ : /API-equivalent estimates, not a bill or subscription quota/)
+  f.change(benefit, '0.003')
+  f.change(probability, '60')
+  await f.save().props.onClick()
+  assert.equal(f.posts[0].minExpectedBenefitUsd, 0.003)
+  assert.equal(f.posts[0].idleContinuationPercent, 60)
+  assert.deepEqual(f.posts[0].modelPolicies, modelPolicies, 'cost-only save preserves all current rules')
+  assert.equal(f.lifetime('codex-business/gpt-5').props.value, 30, 'cost-only save preserves discovered defaults')
+  assert.equal(f.lifetime('saved/current-rule').props.value, 45)
+  assert.deepEqual(f.registrations.map(row => row.name), ['conversation.composer.dock', 'plugins.bundle.config'])
+})
+
+test('older host supplies advanced defaults on both GET and POST without changing policies/catalog', async () => {
+  const { minExpectedBenefitUsd: _benefit, idleContinuationPercent: _probability, ...legacy } = base
+  legacy.modelPolicies = [policy('saved', 'rule', 35)]
+  const f = fixture({ settings: legacy, models: codex })
+  await f.flush()
+  assert.equal(f.byLabel('Minimum expected net benefit (USD)').props.value, 0.05)
+  assert.equal(f.byLabel('Idle continuation probability (%)').props.value, 15)
+  f.change('Warming window while running (minutes)', '40')
+  f.setPost({ ...legacy, activeMinutes: 40 })
+  await f.save().props.onClick()
+  assert.equal(f.posts[0].minExpectedBenefitUsd, 0.05)
+  assert.equal(f.posts[0].idleContinuationPercent, 15)
+  assert.deepEqual(f.posts[0].modelPolicies, legacy.modelPolicies)
+  assert.equal(f.byLabel('Minimum expected net benefit (USD)').props.value, 0.05)
+  assert.equal(f.byLabel('Idle continuation probability (%)').props.value, 15)
+  assert.equal(f.lifetime('saved/rule').props.value, 35)
+  assert.equal(f.lifetime('codex-business/gpt-5').props.value, 30)
+  assert.equal(f.save().props.disabled, true)
+})
+
+for (const [label, invalid, valid] of [
+  ['Minimum expected net benefit (USD)', ['', ' ', '-0.001', '1000.001', 'Infinity', 'NaN', 'not a number'], ['0', '0.001', '1000']],
+  ['Idle continuation probability (%)', ['', ' ', '-1', '100.1', '101', '0.5', 'Infinity', 'NaN'], ['0', '1', '100']],
+  ['Warming window while running (minutes)', ['', '-1', '1.5', '1441', 'Infinity'], ['0', '1', '1440']],
+  ['Warming window while idle (minutes)', ['', '-1', '1.5', '1441', 'Infinity'], ['0', '1', '1440']],
+]) test(`${label} blocks invalid input and accepts numeric boundaries`, async () => {
+  const f = fixture()
+  await f.flush()
+  for (const value of invalid) {
+    f.change(label, value)
+    assert.equal(f.save().props.disabled, true, value)
+    await f.save().props.onClick() // handler also rejects even if invoked directly
+    assert.equal(f.posts.length, 0, value)
+    assert.match(f.text(), /Required fields cannot be blank/)
+    if (!value.trim()) assert.equal(f.byLabel(label).props.value, '', 'blank remains blank, not zero')
+  }
+  for (const value of valid) {
+    f.change(label, value)
+    assert.equal(f.save().props.disabled, false, value)
+    await f.save().props.onClick()
+    assert.equal(f.save().props.disabled, true)
+  }
+  assert.equal(f.posts.length, valid.length)
+})
+
+for (const [field, value] of [
+  ['minExpectedBenefitUsd', null], ['minExpectedBenefitUsd', '0.05'], ['minExpectedBenefitUsd', Infinity],
+  ['idleContinuationPercent', null], ['idleContinuationPercent', '15'], ['idleContinuationPercent', 15.5],
+]) test(`malformed host ${field}=${String(value)} is not silently defaulted`, async () => {
+  const f = fixture({ settings: { ...base, [field]: value } })
+  await f.flush()
+  f.change('Warming window while running (minutes)', '40')
+  assert.equal(f.save().props.disabled, true)
+  await f.save().props.onClick()
+  assert.deepEqual(f.posts, [])
+})
+
+test('advanced controls preserve native typography, compact lifetime width and mobile input sizing', async () => {
+  const f = fixture()
+  await f.flush()
+  const css = f.styles.join('\n')
+  assert.match(css, /\.dsh-cache-settings-label\{[^}]*font-size:13px/)
+  assert.match(css, /\.dsh-cache-settings-advanced summary\{[^}]*font-size:14px/)
+  assert.match(css, /\.dsh-cache-policy-minutes\{width:96px/)
+  assert.match(css, /@media\(max-width:480px\).*dsh-cache-settings-input\{font-size:16px\}/)
+  assert.equal(f.all().filter(node => node.props.role === 'switch').length, 2)
+})
+
+for (const locale of ['en', 'zh']) test(`stalled reads time out, abort, expose Retry and reject late stale results (${locale})`, async () => {
+  const waitingSettings = deferred(), waitingModels = deferred()
+  const f = fixture({ locale, settings: waitingSettings.promise, models: waitingModels.promise })
+  await f.flush()
+  await f.tick(9999)
+  assert.ok(!f.button(locale === 'zh' ? '重试' : 'Retry'))
+  await f.tick(1)
+  assert.match(f.text(), locale === 'zh' ? /设置加载超时/ : /Settings took too long/)
+  assert.match(f.text(), locale === 'zh' ? /模型加载超时/ : /Models took too long/)
+  assert.equal(f.timers.size, 0)
+  assert.ok(f.requests.every(request => request.options.signal.aborted))
+  f.setSettings(base); f.setModels(codex)
+  await f.click(locale === 'zh' ? '重试' : 'Retry')
+  f.render(); await f.flush()
+  await f.click(locale === 'zh' ? '刷新模型' : 'Refresh models')
+  f.render(); await f.flush()
+  assert.equal(f.lifetime('codex-business/gpt-5').props.value, 30)
+  assert.equal(f.byLabel(locale === 'zh' ? '运行中保温窗口（分钟）' : 'Warming window while running (minutes)').props.value, 60)
+  waitingSettings.resolve({ ...base, activeMinutes: 1 }); waitingModels.resolve(openrouter)
+  await f.flush()
+  assert.equal(f.lifetime('codex-business/gpt-5').props.value, 30, 'late catalog cannot replace retry')
+  assert.equal(f.byLabel(locale === 'zh' ? '运行中保温窗口（分钟）' : 'Warming window while running (minutes)').props.value, 60)
+  assert.equal(f.timers.size, 0)
+  f.unmount()
+})
+
+test('JSON body stalls are bounded too; failed refresh preserves catalog and unsaved settings', async () => {
+  const f = fixture({ models: codex })
+  await f.flush()
+  assert.equal(f.timers.size, 0, 'successful reads clear deadlines')
+  f.change('Warming window while running (minutes)', '42')
+  const body = deferred()
+  f.setModels({ ok: true, json: () => body.promise })
+  await f.click('Refresh models'); f.render(); await f.flush(); await f.tick(10000)
+  assert.match(f.text(), /Models took too long/)
+  assert.equal(f.lifetime('codex-business/gpt-5').props.value, 30)
+  assert.equal(f.byLabel('Warming window while running (minutes)').props.value, 42)
+  assert.equal(f.button('Refresh models').props.disabled, false)
+  body.resolve(openrouter); await f.flush()
+  assert.equal(f.lifetime('codex-business/gpt-5').props.value, 30)
+  assert.equal(f.timers.size, 0)
+  f.unmount()
+})
+
+test('unmount cancels deadlines even when read promises never settle', async () => {
+  const f = fixture({ settings: new Promise(() => {}), models: new Promise(() => {}) })
+  await f.flush(); assert.equal(f.timers.size, 2)
+  f.unmount(); await f.flush()
+  assert.equal(f.timers.size, 0)
+  assert.ok(f.requests.every(request => request.options.signal.aborted))
+  assert.equal(f.save(), undefined)
+})
+
 test('both read requests are aborted when the settings component unmounts', async () => {
   const waiting = deferred()
   const f = fixture({ settings: waiting.promise, models: waiting.promise })
+  await f.flush()
   assert.equal(f.requests.length, 2)
   f.unmount()
   assert.ok(f.requests.every(request => request.options.signal.aborted))

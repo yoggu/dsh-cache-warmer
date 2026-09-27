@@ -7,13 +7,13 @@ Estimated **Cache time** with a draining ring, observed cached-token usage, and 
 Requires DeepSeek Harness **0.1.7-rc.2** (the tested runtime) with the standard LLM, session projection and storage services. Install the pinned GitHub tag into your Web profile:
 
 ```sh
-dsh plugin --profile web add 'https://github.com/yoggu/dsh-cache-warmer.git#v0.1.2'
+dsh plugin --profile web add 'https://github.com/yoggu/dsh-cache-warmer.git#v0.1.3'
 ```
 
 Alternatively, clone and link a local checkout:
 
 ```sh
-git clone --branch v0.1.2 https://github.com/yoggu/dsh-cache-warmer.git
+git clone --branch v0.1.3 https://github.com/yoggu/dsh-cache-warmer.git
 cd dsh-cache-warmer
 dsh plugin --profile web add "link:$(pwd)"
 ```
@@ -38,7 +38,7 @@ Known lifetime: decision at `min(0.9 × lifetime, lifetime − 10 seconds)`. Tim
 
 ### Models and cache policies
 
-**Plugins → Cache warmer → Model cache policies** automatically lists the models advertised by all registered Harness provider routes, including Codex accounts, pi-ai providers, and DeepSeek. Search by model/provider or filter by provider; refresh the catalog after changing provider configuration. No manual model IDs are needed. Discovery lists advertised models, not proof of authentication or caching support. An unavailable provider does not erase saved overrides.
+**Plugins → Cache warmer → Model cache policies** automatically lists the models advertised by all registered Harness provider routes, including Codex accounts, pi-ai providers, and DeepSeek. Search by model/provider or filter by provider; refresh the catalog after changing provider configuration. No manual model IDs are needed. Discovery lists advertised models, not proof of authentication or caching support. An unavailable provider does not erase saved overrides. Providers share a five-second discovery deadline; browser settings and model-list reads have a ten-second timeout with Retry, including stalled response bodies. A failed refresh preserves the last model list and unsaved settings rather than leaving the page loading indefinitely.
 
 Known Codex lifetime estimates are filled automatically, with no global defaults switch. Each model has:
 
@@ -76,7 +76,14 @@ Published prices come from the installed pi-ai catalog, the same source used by 
 
 `expected savings = continuation probability × avoided miss cost − refresh cost`
 
-Use Pi's probability assumptions: 100% active, 15% idle, with a $0.05 threshold. Conservatively credit only observed reusable tokens, charge the remainder at uncached input rates, and reserve output cost. Missing prices/evidence skip warming. Cheap OpenRouter DeepSeek Flash contexts usually fail the threshold, intentionally.
+Defaults use Pi's probability assumptions: 100% active, 15% idle, with a $0.05 minimum expected net benefit. **Plugins → Cache warmer → Advanced → Cost checks** exposes:
+
+- `minExpectedBenefitUsd` — minimum expected **net** benefit after subtracting refresh cost; defaults to `0.05`, accepts finite numbers from `0` to `1000` USD. This is not a spending budget.
+- `idleContinuationPercent` — assumed chance of continuing while idle; defaults to `15`, accepts whole percentages from `0` to `100`. This is a fixed planning assumption, not a learned prediction. Zero disables idle warming; the active assumption remains 100%.
+
+Lowering the minimum or raising idle probability can increase warming and usage. These settings change whether a refresh is worthwhile, not the cache lifetime or decision timing. Older clients that omit them preserve current values. Saving cancels captured targets and requires a new genuine request, as with other warming settings.
+
+Conservatively credit only observed reusable tokens, charge the remainder at uncached input rates, and reserve output cost. Missing prices/evidence still prevent warming, including with a zero threshold. Cheap OpenRouter DeepSeek Flash contexts usually fail the default threshold, intentionally.
 
 Codex prices are **API-equivalent heuristics**, not a bill, subscription allowance units, or proof of reduced quota usage. Its refresh reserves at least 1,024 output tokens plus a small uncached suffix in the estimate; observed larger warm outputs increase this reserve. This is not a hard output bound.
 
@@ -110,7 +117,9 @@ Per-session opt-in and aggregate warm usage are stored in separate plugin storag
 
 Capture requires the exact AgentLoop request identity, not merely a matching session id or message shape. Linked installations can have a second copy of the Harness LLM peer dependency; its request-marker registry is separate from the running host's. The warmer resolves the public marker from the module owning the injected `LlmRuntime` (verified with `instanceof`), using the running executable as a fallback resolution anchor. If the owner cannot be resolved in an unusual embedded layout, warming fails closed with an explicit diagnostic.
 
-The popup distinguishes an absent snapshot from a captured request still in progress. The authenticated status endpoint also reports `requestCaptured`, `requestCompleted`, `lastRequestCompletedAt`, and `nextRefreshAt`; a countdown alone is not proof of a scheduled refresh. A completed request can correctly produce an economic skip, especially while idle.
+The popup shows **Cache warming** at the top left and a concise warming status at the top right: **Scheduled**, **Warming**, **Waiting**, **Skipped**, **Stopped**, **Disabled**, or **Unavailable**, followed by a short description underneath. Dollar estimates remain in separate rows rather than being appended to the status. The **Keep cache warm** checkbox sits above all information rows. **Cache lifetime** shows the lifetime assumption; **Time remaining** shows the estimated countdown. The redundant active/idle phase row is omitted. Scheduled means an actual timer exists and current checks pass; conditions are checked again before sending. A worthwhile estimate or countdown alone does not mean a refresh is scheduled.
+
+The popup distinguishes an absent snapshot from a captured request still in progress. The authenticated status endpoint also reports `warmingState`, `requestCaptured`, `requestCompleted`, `lastRequestCompletedAt`, and `nextRefreshAt`. A completed request can correctly produce an economic skip, especially while idle.
 
 ## Verification
 
