@@ -1,6 +1,6 @@
 {
   "name": "dsh-cache-warmer",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Estimated cache time and opt-in, cost-aware prompt-cache warming for DeepSeek Harness sessions.",
   "repository": {
