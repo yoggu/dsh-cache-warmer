@@ -72,7 +72,7 @@ A lifetime cannot add a refresh transport. Compatible OpenRouter Chat Completion
 
 ## Economics (same calculation for API and subscription routes)
 
-Published prices come from the installed pi-ai catalog, the same source used by `dsh-token-cost-estimate`. Each decision uses the **current captured request's input**, not accumulated session usage. Cache-read/write counts are disjoint from uncached input. Pricing tiers use total input including cached tokens.
+Published prices come from the installed pi-ai catalog, the same source used by `dsh-token-cost`. Each decision uses the **current captured request's input**, not accumulated session usage. Cache-read/write counts are disjoint from uncached input. Pricing tiers use total input including cached tokens.
 
 `expected savings = continuation probability × avoided miss cost − refresh cost`
 
