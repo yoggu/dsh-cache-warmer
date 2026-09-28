@@ -4,16 +4,16 @@ Estimated **Cache time** with a draining ring, observed cached-token usage, and 
 
 ## Install
 
-Requires DeepSeek Harness **0.1.7-rc.2** (the tested runtime) with the standard LLM, session projection and storage services. Install the pinned GitHub tag into your Web profile:
+Requires DeepSeek Harness **0.1.7-rc.2** or **0.2.0-rc.1** (the tested runtimes) with the standard LLM, session projection and storage services. Install the pinned GitHub tag into your Web profile:
 
 ```sh
-dsh plugin --profile web add 'https://github.com/yoggu/dsh-cache-warmer.git#v0.1.4'
+dsh plugin --profile web add 'https://github.com/yoggu/dsh-cache-warmer.git#v0.1.5'
 ```
 
 Alternatively, clone and link a local checkout:
 
 ```sh
-git clone --branch v0.1.4 https://github.com/yoggu/dsh-cache-warmer.git
+git clone --branch v0.1.5 https://github.com/yoggu/dsh-cache-warmer.git
 cd dsh-cache-warmer
 dsh plugin --profile web add "link:$(pwd)"
 ```
