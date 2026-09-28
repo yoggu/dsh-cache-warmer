@@ -6,9 +6,16 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
 
     const route = '/api/dsh-cache-warmer';
+    /** Projection the host half publishes as the popup's change signal. */
+    const OBSERVATION_KEY = 'dsh-cache-warmer.observations';
+    /** Stand-in for a slot context that does not carry the projection hook. */
+    const noObservations = () => undefined;
     // Bound the whole read, including response.json(). Aborting fetch alone is
     // insufficient if an intermediary never settles its promise after abort.
-    function readSettingsJson(url, controller) {
+    // A caller may widen the bound: discovery waits on provider work that this
+    // plugin cannot cancel, and a host busy with one read cannot answer the
+    // other until it returns.
+    function readJson(url, controller, deadlineMs = 10000) {
       let timer, onAbort;
       const cancelled = new Promise((_, reject) => {
         onAbort = () => { const error = new Error('Request cancelled'); error.name = 'AbortError'; reject(error); };
@@ -20,7 +27,7 @@ window.__ModuleLoader__.load({
           const error = new Error('Request timed out'); error.name = 'TimeoutError';
           reject(error);
           controller.abort();
-        }, 10000);
+        }, deadlineMs);
       });
       const request = Promise.resolve().then(() => {
         if (controller.signal.aborted) { const error = new Error('Request cancelled'); error.name = 'AbortError'; throw error; }
@@ -215,7 +222,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function CachePill({ sessionId, ctx }) {
+    function CachePill({ sessionId, ctx, useProjection }) {
       const [status, setStatus] = React.useState(null);
       const [loading, setLoading] = React.useState(true);
       const [saving, setSaving] = React.useState(false);
@@ -229,6 +236,27 @@ window.__ModuleLoader__.load({
       const [now, setNow] = React.useState(Date.now());
       const [locale, setLocale] = React.useState(() => getLocale(ctx));
       const labels = createLabels(locale);
+      // The host status is re-read on events, never on an interval: an
+      // untouched Session costs no requests at all.
+      const refreshRef = React.useRef(null);
+      const baselineSeen = React.useRef(false);
+      const announcedTarget = React.useRef(0);
+      // A slot context without the projection seat still renders; it simply has
+      // no push signal and re-reads when the popup opens instead.
+      const useObservations = typeof useProjection === 'function' ? useProjection : noObservations;
+      const observation = useObservations(OBSERVATION_KEY);
+
+      const enabled = Boolean(status && status.enabled);
+      const supported = Boolean(status && status.supported);
+      const ttlMs = finiteNumber(status && status.cacheTtlMs);
+      const expiresAt = readTime(status && status.cacheExpiresAt);
+      const hasTtl = Number.isFinite(ttlMs) && ttlMs > 0;
+      const hasExpiry = hasTtl && Number.isFinite(expiresAt);
+      const remainingMs = hasExpiry ? Math.max(0, expiresAt - now) : NaN;
+      const ringRatio = hasExpiry ? Math.max(0, Math.min(1, remainingMs / ttlMs)) : 0;
+      const pillText = hasExpiry
+        ? `${labels.remaining}${Math.ceil(remainingMs / 60000)}${locale.startsWith('zh') ? '分钟' : 'm'}`
+        : labels.unknownTtl;
 
       React.useEffect(() => {
         const localeApi = ctx.locale;
@@ -246,24 +274,19 @@ window.__ModuleLoader__.load({
         if (!sessionId) {
           setStatus(null);
           setLoading(false);
+          refreshRef.current = null;
           return undefined;
         }
         let alive = true;
         let inFlight = false;
         let controller;
+        // Single flight: a burst of waking events still costs one read.
         const refresh = async () => {
           if (inFlight) return;
           inFlight = true;
           controller = new AbortController();
           try {
-            const response = await fetch(`${route}?sessionId=${encodeURIComponent(sessionId)}`, {
-              method: 'GET',
-              credentials: 'include',
-              headers: { Accept: 'application/json' },
-              signal: controller.signal,
-            });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const payload = await response.json();
+            const payload = await readJson(`${route}?sessionId=${encodeURIComponent(sessionId)}`, controller);
             if (alive) {
               setStatus(payload && typeof payload === 'object' ? payload : null);
               setError('');
@@ -275,20 +298,56 @@ window.__ModuleLoader__.load({
             if (alive) setLoading(false);
           }
         };
+        refreshRef.current = refresh;
         setLoading(true);
         refresh();
-        const poll = setInterval(refresh, 15000);
         return () => {
           alive = false;
-          clearInterval(poll);
+          refreshRef.current = null;
           if (controller) controller.abort();
         };
       }, [sessionId]);
 
+      // While the popup is open, a new durable observation is the one event
+      // that can move the shown status by itself, so re-read exactly then. A
+      // closed popup shows only the local countdown and spends nothing, and the
+      // first defined value is the follow baseline rather than a change.
       React.useEffect(() => {
-        const timer = setInterval(() => setNow(Date.now()), 1000);
-        return () => clearInterval(timer);
-      }, []);
+        if (!open || observation === undefined) return;
+        if (!baselineSeen.current) { baselineSeen.current = true; return; }
+        refreshRef.current?.();
+      }, [observation, open]);
+
+      // Opening the popup is a user read of the live status: always fresh.
+      React.useEffect(() => {
+        if (!open) return;
+        announcedTarget.current = 0;
+        refreshRef.current?.();
+      }, [open]);
+
+      // The host states when its own decision points are; while the popup is
+      // open, wake exactly then — once per announced moment, never on a timer.
+      React.useEffect(() => {
+        if (!open || !status) return undefined;
+        const targets = [readTime(status.nextRefreshAt), readTime(status.windowEndsAt), expiresAt]
+          .filter(target => Number.isFinite(target) && target > Date.now() + 1000);
+        if (!targets.length) return undefined;
+        const target = Math.min(...targets);
+        // A target already used, or one the host keeps restating, must not
+        // schedule again: the next read is always a strictly later moment.
+        if (target <= announcedTarget.current) return undefined;
+        const timer = setTimeout(() => { announcedTarget.current = target; refreshRef.current?.(); }, target - Date.now() + 100);
+        return () => clearTimeout(timer);
+      }, [open, status]);
+
+      // Local clock only: wake when the displayed minute changes, and not at
+      // all once the estimate has elapsed or is unknown.
+      React.useEffect(() => {
+        if (!Number.isFinite(remainingMs) || remainingMs <= 0) return undefined;
+        const offset = remainingMs % 60000;
+        const timer = setTimeout(() => setNow(Date.now()), (offset === 0 ? 60000 : offset) + 50);
+        return () => clearTimeout(timer);
+      }, [remainingMs]);
       React.useEffect(() => {
         if (!open) { setPanelPos(null); return undefined; }
         const place = () => {
@@ -330,18 +389,6 @@ window.__ModuleLoader__.load({
           document.removeEventListener('pointerdown', onPointerDown);
         };
       }, [open]);
-
-      const enabled = Boolean(status && status.enabled);
-      const supported = Boolean(status && status.supported);
-      const ttlMs = finiteNumber(status && status.cacheTtlMs);
-      const expiresAt = readTime(status && status.cacheExpiresAt);
-      const hasTtl = Number.isFinite(ttlMs) && ttlMs > 0;
-      const hasExpiry = hasTtl && Number.isFinite(expiresAt);
-      const remainingMs = hasExpiry ? Math.max(0, expiresAt - now) : NaN;
-      const ringRatio = hasExpiry ? Math.max(0, Math.min(1, remainingMs / ttlMs)) : 0;
-      const pillText = hasExpiry
-        ? `${labels.remaining}${Math.ceil(remainingMs / 60000)}${locale.startsWith('zh') ? '分钟' : 'm'}`
-        : labels.unknownTtl;
 
       const requestEnabled = async (nextEnabled) => {
         if (!sessionId || (nextEnabled && !supported) || saving) return;
@@ -578,7 +625,9 @@ window.__ModuleLoader__.load({
         let active = true;
         const controller = new AbortController();
         setError('');
-        readSettingsJson(`${route}?scope=settings`, controller)
+        // The settings read shares the host with model discovery, so it gets
+        // the same window: one slow read must not fail the other panel.
+        readJson(`${route}?scope=settings`, controller, 25000)
           .then(value => { if (active) { const settings = editable(value); setValues(settings); setDraft(settings); } })
           .catch(cause => { if (active) setError(cause.name === 'TimeoutError' ? 'load-timeout' : 'load'); });
         return () => { active = false; controller.abort(); };
@@ -587,7 +636,9 @@ window.__ModuleLoader__.load({
         let active = true;
         const controller = new AbortController();
         setModelsLoading(true);
-        readSettingsJson(`${route}?scope=models`, controller)
+        // Model discovery can wait on a slow provider once; the host then stops
+        // re-asking that provider, so the wider bound is paid at most once.
+        readJson(`${route}?scope=models`, controller, 25000)
           .then(value => {
             if (!value || !Array.isArray(value.providers)) throw new Error('models');
             if (active) setCatalog(value);

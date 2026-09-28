@@ -412,9 +412,11 @@ for (const locale of ['en', 'zh']) test(`stalled reads time out, abort, expose R
   const waitingSettings = deferred(), waitingModels = deferred()
   const f = fixture({ locale, settings: waitingSettings.promise, models: waitingModels.promise })
   await f.flush()
-  await f.tick(9999)
+  await f.tick(24999)
   assert.ok(!f.button(locale === 'zh' ? '重试' : 'Retry'))
   await f.tick(1)
+  // Both reads share one window: the host serves them one at a time, so a slow
+  // discovery must not fail the settings panel next to it.
   assert.match(f.text(), locale === 'zh' ? /设置加载超时/ : /Settings took too long/)
   assert.match(f.text(), locale === 'zh' ? /模型加载超时/ : /Models took too long/)
   assert.equal(f.timers.size, 0)
@@ -441,7 +443,7 @@ test('JSON body stalls are bounded too; failed refresh preserves catalog and uns
   f.change('Warming window while running (minutes)', '42')
   const body = deferred()
   f.setModels({ ok: true, json: () => body.promise })
-  await f.click('Refresh models'); f.render(); await f.flush(); await f.tick(10000)
+  await f.click('Refresh models'); f.render(); await f.flush(); await f.tick(25000)
   assert.match(f.text(), /Models took too long/)
   assert.equal(f.lifetime('codex-business/gpt-5').props.value, 30)
   assert.equal(f.byLabel('Warming window while running (minutes)').props.value, 42)

@@ -65,6 +65,67 @@ test('concurrent loads coalesce; hanging adapters time out and refresh does not 
   directory.dispose(); t.mock.timers.reset()
 })
 
+test('a provider that overruns the deadline is put on cooldown instead of being re-asked', async () => {
+  const calls = []
+  const ctx = { llm: {
+    listProviders: () => [{ id: 'slow' }, { id: 'healthy' }],
+    listModels: async p => {
+      calls.push(p)
+      // Real time: discovery here cannot be cancelled, and the deadline may not
+      // even be able to fire while a provider holds the process.
+      if (p === 'slow') { await new Promise(resolve => setTimeout(resolve, 40)); return [{ id: 'slow-model' }] }
+      return [{ id: 'available' }]
+    },
+  } }
+  const directory = createModelDirectory(ctx, { inspect, timeoutMs: 10 })
+  const first = await directory.load()
+  assert.deepEqual(calls, ['slow', 'healthy'])
+  assert.equal(first.providers[0].error, 'model-discovery-timeout')
+  assert.equal(first.providers[1].models[0].id, 'available')
+
+  await new Promise(resolve => setTimeout(resolve, 60))
+  const second = await directory.load()
+  assert.equal(calls.filter(p => p === 'slow').length, 1, 'a cooling provider is not asked again')
+  assert.equal(second.providers[0].error, 'model-discovery-timeout')
+  assert.equal(second.providers[0].models.length, 0)
+  assert.equal(second.providers[1].models[0].id, 'available')
+
+  directory.invalidate()
+  await directory.load()
+  assert.equal(calls.filter(p => p === 'slow').length, 1, 'an unrelated adapter update keeps the cooldown')
+  directory.dispose()
+
+  const fresh = createModelDirectory(ctx, { inspect, timeoutMs: 10 })
+  await fresh.load()
+  assert.equal(calls.filter(p => p === 'slow').length, 2, 'a fresh instance starts with a clean slate')
+  fresh.dispose()
+})
+
+test('a catalog of many models reads each provider route once per pass', async () => {
+  // The route read walks the plugin registry and the whole settings projection.
+  // Repeating it per model held the Host for ~19 s on a 386-model catalog, so
+  // one pass must read it exactly once per provider and share that view.
+  const calls = { entries: 0, described: 0, registered: 0 }
+  const models = ['openai/gpt-4.1', 'google/gemini-2.5-pro', 'meta-llama/llama-3.3-70b-instruct', 'anthropic/claude-sonnet-4.5:batch']
+  const ctx = {
+    get: name => ({
+      configEditor: { entries: () => { calls.entries++; return [{ options: { id: 'pi', name: '@deepseek-ai/dsh-llm-pi-ai' }, fiber: { state: 2 } }] } },
+      settings: { describe: () => { calls.described++; return [{ ns: 'pi', revision: 1, value: { providers: { openrouter: { apiKeyEnv: 'TEST_OPENROUTER_KEY' } } } }] } },
+      credentials: {},
+      llm: { listProviders: () => { calls.registered++; return [{ id: 'openrouter' }] } },
+    })[name],
+  }
+  const directory = createModelDirectory({ ...ctx, llm: {
+    listProviders: () => { calls.registered++; return [{ id: 'openrouter' }] },
+    listModels: async provider => models.map(id => ({ provider, id, name: id })),
+  } })
+  const result = await directory.load()
+  assert.deepEqual(calls, { entries: 1, described: 1, registered: 1 })
+  assert.equal(result.providers[0].models.length, models.length)
+  assert.deepEqual([...new Set(result.providers[0].models.map(m => m.reasonCode))], [null], 'every catalog model is admitted in one pass')
+  directory.dispose()
+})
+
 test('provider lookup failure is safe and disposal ends pending UI waits', async () => {
   const broken = createModelDirectory({ llm: { listProviders: () => { throw new Error('private') } } }, { inspect })
   assert.deepEqual(await broken.load(), { providers: [], error: 'provider-discovery-failed' })
