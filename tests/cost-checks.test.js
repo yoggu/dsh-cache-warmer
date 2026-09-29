@@ -3,10 +3,13 @@ import test from 'node:test'
 import { normalizeCostChecks, warmingDecision, policyFor, MINUTE } from '../lib/policy.js'
 import { Config, statusFor } from '../lib/index.js'
 
-const policy = policyFor('codex-personal', 'gpt-6-astra')
+const rule = { provider: 'openrouter', model: 'openai/gpt-4.1', enabled: true, cacheMinutes: 30 }
+const policy = policyFor(rule.provider, rule.model, { modelPolicies: [rule] })
 const usage = { inputTokens: 0, cacheReadTokens: 1000000, outputTokens: 1 }
 const cost = { input: 10, cacheRead: 1, cacheWrite: 0, output: 0 }
-const decision = (settings = {}, active = false, override = {}) => warmingDecision({ usage, cost, policy, active, settings, ...override })
+const estimateOf = rates => rates && (buckets => Object.entries(buckets).reduce((sum, [key, amount]) => sum + amount * rates[key] / 1e6, 0))
+const decision = (settings = {}, active = false, override = {}) => warmingDecision({ usage, estimate: estimateOf(cost), policy, active, settings,
+  ...('cost' in override ? { ...override, estimate: estimateOf(override.cost) } : override) })
 
 test('cost settings are explicit finite numbers with strict defaults and ranges', () => {
   assert.deepEqual(normalizeCostChecks(), { minExpectedBenefitUsd: .05, idleContinuationPercent: 15 })
@@ -57,7 +60,7 @@ test('zero probability disables idle even with zero threshold and zero prices; m
   assert.equal(decision({ minExpectedBenefitUsd: 0 }, false, { cost: null }).reason, 'unknown-pricing')
 })
 
-const settings = { autoWarmNewChats: false, activeMinutes: 60, idleMinutes: 30 }
+const settings = { autoWarmNewChats: false, activeMinutes: 60, idleMinutes: 30, modelPolicies: [rule] }
 const state = () => ({ sessionId: 's', provider: policy.provider, model: policy.model, retention: 'long',
   transportAvailable: true, storageAvailable: true, cacheTtlMs: policy.cacheTtlMs,
   lastCacheHitAt: 1000, lastRequestAt: 1000, lastRequestFinished: true, lastRequestSnapshot: {},

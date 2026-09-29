@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  CODEX_ROUTES, MINUTE, OPENROUTER_MODEL, codexLifetime, createCatalogReader,
-  decisionDelay, defaultModelPolicies, nextDecisionAt, normalizeModelPolicies,
+  MINUTE, OPENROUTER_MODEL,
+  decisionDelay, nextDecisionAt, normalizeModelPolicies,
   policyFor, warmingDecision,
 } from '../lib/policy.js'
 
-const codex = { provider: 'codex-business', model: 'gpt-6-astra' }
-const row = (overrides = {}) => ({ ...codex, enabled: true, cacheMinutes: 30, ...overrides })
-const legacyRow = (overrides = {}) => ({ ...codex, enabled: true, shortMinutes: 5, longMinutes: 30, ...overrides })
+const route = { provider: 'openrouter', model: 'openai/gpt-4.1' }
+const codex = route // Legacy test fixture name; all positive transport tests use OpenRouter.
+const row = (overrides = {}) => ({ ...route, enabled: true, cacheMinutes: 30, ...overrides })
+const legacyRow = (overrides = {}) => ({ ...route, enabled: true, shortMinutes: 5, longMinutes: 30, ...overrides })
 const settings = (rule, extra = {}) => ({ modelPolicies: [rule], ...extra })
-const at = (s, tier = 'long', route = codex) => policyFor(route.provider, route.model, s, tier)
+const at = (s, tier = 'long', selected = route) => policyFor(selected.provider, selected.model, s, tier)
 
 // Configuration is intentionally narrow: an estimate is not a provider capability.
 test('model policies canonicalize one cache estimate without mutating input', () => {
@@ -142,9 +143,9 @@ test('exact custom rules share one estimate across both modes with no alias or c
   assert.equal(at(s).warmingAllowed, true)
   assert.equal(at(s).transportSupported, true)
   assert.match(at(s).cacheEstimateSource, /User-configured.*not provider-reported/)
-  assert.equal(at(s, 'long', { ...codex, provider: 'codex-personal' }).ruleSource, 'codex-default')
-  assert.equal(at(s, 'long', { ...codex, model: 'GPT-6-ASTRA' }).ruleSource, 'unknown')
-  assert.equal(at(s, 'long', { ...codex, model: 'gpt-6-sol' }).cacheTtlMs, 30 * MINUTE)
+  assert.equal(at(s, 'long', { ...route, provider: 'openai-codex' }), null)
+  assert.equal(at(s, 'long', { ...route, model: 'OPENAI/GPT-4.1' }).ruleSource, 'unknown')
+  assert.equal(at(s, 'long', { ...route, model: OPENROUTER_MODEL }).cacheTtlMs, null)
 })
 
 test('blank and disabled overrides suppress fallback while retaining useful observations', () => {
@@ -164,32 +165,26 @@ test('blank and disabled overrides suppress fallback while retaining useful obse
   }
 })
 
-test('Codex defaults are optional reviewed estimates; unknown tiers and models cannot schedule', () => {
-  for (const provider of CODEX_ROUTES) {
-    assert.equal(policyFor(provider, codex.model).cacheTtlMs, 30 * MINUTE)
-    assert.equal(policyFor(provider, 'gpt-5.4-codex').cacheTtlMs, 5 * MINUTE)
+test('legacy and OAuth Codex routes cannot schedule even with saved opt-ins', () => {
+  for (const provider of ['codex-personal', 'codex-business', 'openai-codex', 'deepseek-official']) {
+    const oldPolicy = policyFor(provider, 'gpt-6-sol', settings(row({ provider, model: 'gpt-6-sol' })))
+    assert.equal(oldPolicy.transportSupported, false)
+    assert.equal(oldPolicy.warmingAllowed, false)
+    assert.equal(decisionDelay(oldPolicy), null)
+    assert.equal(nextDecisionAt({ lastRequestAt: 1000, agentRunning: true }, true,
+      { activeMinutes: 60, idleMinutes: 30 }, oldPolicy, 1000), null)
   }
   const baseline = at({})
-  assert.equal(baseline.ruleSource, 'codex-default')
-  assert.equal(baseline.subscription, true)
-  assert.equal(baseline.kind, 'codex')
-  assert.equal(baseline.outputReserve, 1024)
-  assert.match(baseline.cacheEstimateSource, /CodexZero/)
-  const off = at({ useCodexDefaults: false })
-  assert.equal(off.cacheTtlMs, null)
-  assert.equal(off.warmingAllowed, false)
-  assert.equal(off.ruleSource, 'unknown')
-  assert.equal(at(settings(row(), { useCodexDefaults: false })).cacheTtlMs, 30 * MINUTE)
+  assert.equal(baseline.ruleSource, 'unknown')
+  assert.equal(baseline.subscription, false)
+  assert.equal(baseline.kind, 'openrouter')
+  assert.equal(baseline.outputReserve, 8)
+  assert.equal(baseline.cacheTtlMs, null)
+  assert.equal(at(settings(row())).cacheTtlMs, 30 * MINUTE)
   for (const retention of [null, '', 'none', 'unknown', 'LONG', 30]) {
-    assert.equal(at({}, retention).cacheTtlMs, null)
     assert.equal(at(settings(row()), retention).cacheTtlMs, null)
     assert.equal(decisionDelay(at(settings(row()), retention)), null)
   }
-  const unknown = policyFor('codex-business', 'gpt-99')
-  assert.equal(unknown.cacheTtlMs, null)
-  assert.equal(unknown.transportSupported, true)
-  assert.equal(unknown.warmingAllowed, false)
-  assert.equal(unknown.ruleSource, 'unknown')
 })
 
 test('OpenRouter never invents a lifetime or cadence; compatible catalog models can warm', () => {
@@ -220,7 +215,7 @@ test('OpenRouter never invents a lifetime or cadence; compatible catalog models 
   const unsupported = policyFor('openrouter', 'unknown/model',
     settings(row({ provider: 'openrouter', model: 'unknown/model' })))
   assert.equal(unsupported.cacheTtlMs, 30 * MINUTE)
-  assert.equal(unsupported.warmingAllowed, true)
+  assert.equal(unsupported.warmingAllowed, false)
   assert.equal(unsupported.transportSupported, false)
   assert.equal(decisionDelay(unsupported), null)
 })
@@ -232,13 +227,13 @@ test('configured non-reviewed providers remain unsupported regardless of economi
   assert.equal(p.kind, 'unsupported')
   assert.equal(p.ruleSource, 'custom')
   assert.equal(p.cacheTtlMs, 30 * MINUTE)
-  assert.equal(p.warmingAllowed, true)
+  assert.equal(p.warmingAllowed, false)
   assert.equal(p.transportSupported, false)
   assert.equal(decisionDelay(p), null)
 })
 
 test('scheduler requires both policy gates and a known TTL; legacy cadence is ignored', () => {
-  const p = at({})
+  const p = at(settings(row()))
   const state = { lastRequestAt: 1000, lastCacheHitAt: 1000, agentRunning: false }
   const s = { activeMinutes: 60, idleMinutes: 30 }
   assert.equal(nextDecisionAt(state, true, s, p, 1000), 1000 + 27 * MINUTE)
@@ -250,36 +245,25 @@ test('scheduler requires both policy gates and a known TTL; legacy cadence is ig
   assert.equal(nextDecisionAt(state, false, s, p, 1000), null)
 })
 
-test('economics remain independent of scheduling gates and continue using catalog prices', () => {
+test('pure economics remain independent of scheduling gates with supplied prices', () => {
   const usage = { inputTokens: 1000, cacheReadTokens: 200000, outputTokens: 2 }
-  const cost = createCatalogReader()(codex.provider, codex.model)
-  assert.ok(cost)
-  const p = at({})
-  const enabled = warmingDecision({ usage, cost, policy: p, active: true })
-  const disabled = warmingDecision({ usage, cost, policy: { ...p, warmingAllowed: false, cacheTtlMs: null }, active: true })
+  const cost = { input: 10, cacheRead: 1, cacheWrite: 12, output: 50 }
+  const p = at(settings(row()))
+  const estimate = buckets => Object.entries(buckets).reduce((sum, [key, amount]) => sum + amount * cost[key] / 1e6, 0)
+  const enabled = warmingDecision({ usage, estimate, policy: p, active: true })
+  const disabled = warmingDecision({ usage, estimate, policy: { ...p, warmingAllowed: false, cacheTtlMs: null }, active: true })
   assert.deepEqual(enabled, disabled)
-  assert.equal(enabled.outputReserve, 1024)
+  assert.equal(enabled.outputReserve, 8)
 })
 
-test('illustrative Codex defaults are frozen concrete canonical rows, not runtime guarantees', () => {
-  const defaults = defaultModelPolicies()
-  assert.ok(defaults.length > 0 && defaults.length <= 100)
-  assert.ok(Object.isFrozen(defaults))
-  assert.deepEqual(normalizeModelPolicies(defaults), defaults)
-  for (const entry of defaults) {
-    assert.ok(Object.isFrozen(entry))
-    assert.ok(CODEX_ROUTES.has(entry.provider))
-    assert.equal(entry.enabled, true)
-    assert.equal(entry.cacheMinutes, codexLifetime(entry.model) / MINUTE)
-    for (const retention of ['short', 'long']) {
-      const p = at({ modelPolicies: defaults }, retention, entry)
-      assert.equal(p.ruleSource, 'custom')
-      assert.equal(p.cacheTtlMs, entry.cacheMinutes * MINUTE)
-    }
-    assert.deepEqual(Object.keys(entry).sort(), ['cacheMinutes', 'enabled', 'model', 'provider'])
+test('there are no implicit account-route lifetimes; legacy settings remain observational', () => {
+  for (const provider of ['openai-codex', 'codex-personal', 'codex-business']) {
+    const selected = { provider, model: 'gpt-6-sol' }
+    assert.equal(policyFor(provider, selected.model), null)
+    const configured = policyFor(provider, selected.model, settings(row(selected)))
+    assert.equal(configured.cacheTtlMs, 30 * MINUTE)
+    assert.equal(configured.warmingAllowed, false)
   }
-  assert.throws(() => defaults.push(row()), TypeError)
-  assert.throws(() => { defaults[0].cacheMinutes = 999 }, TypeError)
 })
 
 test('model enable toggle preserves the lifetime without overriding unknown TTL guard', () => {

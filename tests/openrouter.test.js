@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { findPackageJSON } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { Config } from '@deepseek-ai/dsh-llm-pi-ai';
-import { buildBoundedAdapter, createBoundedOpenRouter, openRouterModelSupport, readOpenRouterRoute, validateBoundedPayload, OPENROUTER_MODEL, OPENROUTER_BASE, MAX_WIRE_BYTES } from '../lib/openrouter.js';
+import { buildBoundedAdapter, createBoundedOpenRouter, openRouterModelSupport, readOpenRouterRoute, validateBoundedPayload, requireReviewedPiAiVersion, REVIEWED_PI_AI_VERSION, OPENROUTER_MODEL, OPENROUTER_BASE, MAX_WIRE_BYTES } from '../lib/openrouter.js';
 const manifest = findPackageJSON('@earendil-works/pi-ai', import.meta.resolve('@deepseek-ai/dsh-llm-pi-ai'));
 const { openrouterProvider } = await import(new URL('./dist/providers/openrouter.js', pathToFileURL(manifest)).href);
 const catalog = openrouterProvider();
@@ -31,6 +34,17 @@ function inspectAdapter(provider = catalog, extra = {}) {
   buildBoundedAdapter({ modelId: OPENROUTER_MODEL, catalogProvider: provider, route: {}, resolveApiKey: async () => 'offline', Adapter, ...extra });
   return config.profiles().get('openrouter').piProvider.getModels()[0];
 }
+
+test('unreviewed pi-ai 0.85 serializer fails closed before provider construction or paid request', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'cache-warmer-pi-version-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const fake = join(dir, 'package.json');
+  writeFileSync(fake, JSON.stringify({ version: '0.85.1' }));
+  assert.throws(() => requireReviewedPiAiVersion(fake), error => error.reasonCode === 'unsupported-capability');
+  writeFileSync(fake, JSON.stringify({ version: REVIEWED_PI_AI_VERSION }));
+  assert.doesNotThrow(() => requireReviewedPiAiVersion(fake));
+  assert.doesNotThrow(() => requireReviewedPiAiVersion(manifest));
+});
 
 test('route admission is explicit, active, and refuses custom settings', () => {
   assert.equal(readOpenRouterRoute(context()).apiKeyEnv, 'TEST_OPENROUTER_KEY');
@@ -61,9 +75,26 @@ test('synchronous support and builder share installed exact-model protocol admis
   for (const id of [undefined, '', '*', OPENROUTER_MODEL.toUpperCase(), 'not-a-model', 'auto', 'openrouter/free']) {
     assert.deepEqual(openRouterModelSupport(id), { supported: false, reasonCode: 'unsupported-model' });
   }
-  assert.deepEqual(openRouterModelSupport('anthropic/claude-3-haiku'), { supported: false, reasonCode: 'unsupported-protocol' });
-  assert.throws(() => inspectAdapter(catalog, { modelId: 'anthropic/claude-3-haiku' }), /unsupported-protocol/);
+  assert.deepEqual(openRouterModelSupport('anthropic/claude-haiku-4.5'), { supported: false, reasonCode: 'unsupported-protocol' });
+  assert.throws(() => inspectAdapter(catalog, { modelId: 'anthropic/claude-haiku-4.5' }), /unsupported-protocol/);
   assert.throws(() => inspectAdapter(catalog, { modelId: undefined }), /unsupported-model/);
+});
+test('typed catalog keys map to bare chat identities without admitting other model types', () => {
+  const groups = JSON.parse(readFileSync(new URL('./dist/providers/data/openrouter.json', pathToFileURL(manifest)), 'utf8'));
+  const row = groups['openai-completions'][`chat:${OPENROUTER_MODEL}`];
+  assert.equal(row.type, 'chat');
+  assert.equal(row.id, OPENROUTER_MODEL);
+  assert.deepEqual(catalog.getModels().find(model => model.id === row.id), row);
+  assert.ok(catalog.getModels().every(model => model.type === 'chat'));
+  assert.ok(catalog.getAllModels().some(model => model.type === 'image'));
+  assert.ok(catalog.getAllModels().some(model => model.type === 'classifier'));
+  for (const type of ['chat', 'image', 'classifier']) {
+    assert.deepEqual(openRouterModelSupport(`${type}:${OPENROUTER_MODEL}`),
+      { supported: false, reasonCode: 'unsupported-model' }, 'type-prefixed storage keys are not request ids');
+  }
+  for (const type of ['image', 'classifier', undefined]) {
+    assert.throws(() => inspectAdapter(modelFixture({ type })), error => error.reasonCode === 'unsupported-protocol');
+  }
 });
 test('catalog-wide support never disagrees with construction', () => {
   for (const model of catalog.getModels()) {
@@ -166,7 +197,7 @@ test('bounded production serializer applies per-model caps and never retries', a
   const options = { ...optionsFor(), sessionId: 'bounded-offline', reasoningEffort: 'off', system: 'stable prefix', tools: [{ name: 'fixture', description: 'never executed', parameters: { type: 'object', properties: {} } }] };
   const output = await consume(adapter.stream(options));
   assert.equal(calls, 1);
-  assert.deepEqual(received.body.provider.max_price, { prompt: .03, completion: .8, request: 0 });
+  assert.deepEqual(received.body.provider.max_price, { prompt: .012, completion: 1.25, request: 0 });
   assert.equal(received.body.provider.allow_fallbacks, false);
   assert.equal(received.body.provider.require_parameters, true);
   assert.equal(received.body.max_completion_tokens, 8);

@@ -2,31 +2,27 @@
 
 Estimated **Cache time** with a draining ring, observed cached-token usage, and opt-in cost-aware warming. Settings live only in **Plugins → Cache warmer**, not the global Settings modal. English and Chinese UI; popup checkbox and native-style settings switch.
 
-## Install
+## Requirements and installation
 
-Requires DeepSeek Harness **0.1.7-rc.2** or **0.2.0-rc.1** (the tested runtimes) with the standard LLM, session projection and storage services. Install the pinned GitHub tag into your Web profile:
+The current implementation requires a compatible Harness runtime with its standard LLM, session projection, credentials and storage services, plus the shipped pi-ai adapter. The bounded OpenRouter transport and catalog snapshot are reviewed against **pi-ai 0.99.1**; a different serializer version or changed catalog fails closed until reviewed. There is no separate pi-ai dependency to upgrade in this plugin.
+
+Install the latest source from this repository's existing default branch:
 
 ```sh
-dsh plugin --profile web add 'https://github.com/yoggu/dsh-cache-warmer.git#v0.1.5'
+dsh plugin --profile web add 'https://github.com/yoggu/dsh-cache-warmer.git#master'
 ```
 
-Alternatively, clone and link a local checkout:
+Or link a local checkout:
 
 ```sh
-git clone --branch v0.1.5 https://github.com/yoggu/dsh-cache-warmer.git
+git clone https://github.com/yoggu/dsh-cache-warmer.git
 cd dsh-cache-warmer
 dsh plugin --profile web add "link:$(pwd)"
 ```
 
-Keep a linked checkout in place. Replace `web` if your profile has a different name. Reload the GUI after installation; restart Harness if the installer requires it. Open **Plugins → Cache warmer** for defaults, then enable **Keep cache warm** in a chat's **Cache time** popup. Warming is off by default and needs a new genuine model request after installation/reload.
+Keep linked checkouts in place while installed. Restart DSH after replacing an installed package version, then refresh the browser. Existing older tags do not contain all current safeguards. Warming remains **off by default** and requires a new genuine model request, explicit model enablement with an estimated lifetime, and per-chat opt-in. Updating or installing the plugin does not itself make a warming request.
 
-For Codex, also install and configure [dsh-codex-account](https://github.com/yoggu/dsh-codex-account), using the `codex-personal` or `codex-business` route. OpenRouter requires the Harness pi-ai provider and its configured credential. This plugin never copies credentials into its own files. The token-cost estimator is optional, not a runtime dependency.
-
-To uninstall:
-
-```sh
-dsh plugin --profile web remove dsh-cache-warmer
-```
+Warming currently requires the shipped Harness pi-ai OpenRouter route and its configured credential. Shipped pi-ai OAuth `openai-codex`, `deepseek-official`, and older custom Codex routes remain observation-only: no background sends, even with historical saved policies and chat opt-in. No optional `modelPricing` service is required. This plugin never copies credentials into its own files.
 
 ## Settings and lifetime
 
@@ -40,18 +36,18 @@ Known lifetime: decision at `min(0.9 × lifetime, lifetime − 10 seconds)`. Tim
 
 **Plugins → Cache warmer → Model cache policies** automatically lists the models advertised by all registered Harness provider routes, including Codex accounts, pi-ai providers, and DeepSeek. Search by model/provider or filter by provider; refresh the catalog after changing provider configuration. No manual model IDs are needed. Discovery lists advertised models, not proof of authentication or caching support. An unavailable provider does not erase saved overrides. Providers share a five-second discovery deadline; browser settings and model-list reads have a ten-second timeout with Retry, including stalled response bodies. A failed refresh preserves the last model list and unsaved settings rather than leaving the page loading indefinitely.
 
-Known Codex lifetime estimates are filled automatically, with no global defaults switch. Each model has:
+No provider-reported lifetime or built-in Codex lifetime is assumed. Each model has:
 
 - **Enable warming**: permits warming for this model; turning it off preserves its lifetime. Per-chat opt-in still applies.
 - **Estimated cache lifetime (minutes)**: an integer from 1 to 10080. Blank means **unknown**, so no automatic warming is sent even when enabled.
-- **Reset to default**: restores the known estimate and enablement (or unknown/disabled for models without defaults).
+- **Reset to default**: restores unknown lifetime and disabled warming. Historical Codex rules never enable a transport.
 - A transport status: unsupported models remain visible with an explanation rather than disappearing from the list.
 
 Only your exact provider/model overrides are saved in `modelPolicies`, not the discovered catalog. Duplicate pairs are rejected; at most 100 overrides. A custom rule replaces the default, including blank or disabled values. A disabled model can still display an estimated countdown and observed cache hits, but sends no refresh.
 
 Changing a lifetime does **not** change the provider's requested retention or guarantee an expiry; all values are local planning assumptions. Provider-side caching disabled (`cacheRetention: none`) still blocks scheduling. Saving settings cancels captured targets; a new genuine request is required before warming resumes.
 
-Compatibility: existing `enabled: false` rules retain their lifetimes and remain disabled. An older `useCodexDefaults: false` setting is respected internally rather than silently re-enabling models; resetting an individual known model explicitly restores its default. Old `shortMinutes`/`longMinutes` rows migrate conservatively: two known values become the smaller value; if either is unknown, the unified value remains unknown. Saving writes the single `cacheMinutes` field. Mixing old and new lifetime fields in one row is rejected.
+Compatibility: existing `enabled: false` rules retain their displayed lifetimes and remain disabled. The older `useCodexDefaults` field is accepted for settings compatibility but no longer grants account-route warming. Old `shortMinutes`/`longMinutes` rows migrate conservatively: two known values become the smaller value; if either is unknown, the unified value remains unknown. Saving writes the single `cacheMinutes` field. Mixing old and new lifetime fields in one row is rejected.
 
 Example saved override (an illustrative assumption, not an OpenRouter TTL claim):
 
@@ -68,11 +64,11 @@ Example saved override (an illustrative assumption, not an OpenRouter TTL claim)
 }
 ```
 
-A lifetime cannot add a refresh transport. Compatible OpenRouter Chat Completions catalog models and the two Codex account routes have transports; other providers and unsupported protocols stay visible but observation-only. A refresh still requires cache evidence, known prices, the savings threshold and an unexpired activity window.
+A lifetime cannot add a refresh transport. Only compatible OpenRouter Chat Completions catalog models have a bounded transport; `openai-codex`, `deepseek-official`, `codex-personal`, `codex-business`, other providers and unsupported protocols stay visible but observation-only. A refresh still requires cache evidence, known prices, the savings threshold and an unexpired activity window.
 
-## Economics (same calculation for API and subscription routes)
+## Economics (independent from warming permission)
 
-Published prices come from the installed pi-ai catalog, the same source used by `dsh-token-cost`. Each decision uses the **current captured request's input**, not accumulated session usage. Cache-read/write counts are disjoint from uncached input. Pricing tiers use total input including cached tokens.
+Published list-price hypotheticals use `calculateCost` from the **shipped `@deepseek-ai/dsh-llm-pi-ai` adapter's own reviewed pi-ai copy**, with fresh usage and cost objects for each hypothetical. There is no `modelPricing` dependency, and a pricing estimate never adds a warming transport. Both scheduling and immediately-before-send admission check the exact owner/catalog/version and pinned OpenRouter catalog SHA-256; missing, changed, malformed or non-finite costs fail closed. Each decision uses the **current captured request's input**, not accumulated session usage. Cache-read/write counts are disjoint from uncached input; native price tiers are handled by pi-ai.
 
 `expected savings = continuation probability × avoided miss cost − refresh cost`
 
@@ -85,23 +81,17 @@ Lowering the minimum or raising idle probability can increase warming and usage.
 
 Conservatively credit only observed reusable tokens, charge the remainder at uncached input rates, and reserve output cost. Missing prices/evidence still prevent warming, including with a zero threshold. Cheap OpenRouter DeepSeek Flash contexts usually fail the default threshold, intentionally.
 
-Codex prices are **API-equivalent heuristics**, not a bill, subscription allowance units, or proof of reduced quota usage. Its refresh reserves at least 1,024 output tokens plus a small uncached suffix in the estimate; observed larger warm outputs increase this reserve. This is not a hard output bound.
+Cost projections are **API-equivalent list-price estimates**, not a bill or proof of reduced quota use. A bounded refresh reserves eight output tokens (or more only if a larger actual output was observed) in its hypothetical cost; the actual transport caps output at eight. The OpenRouter shadow preserves the captured prefix without appending a keepalive suffix.
 
 ## Provider behavior
 
-### Codex account routes
+### Observation-only routes
 
-`codex-personal` and `codex-business` use the existing `dsh-codex-account` adapter through the public `llm.prepareCall` contract. Authentication, account mapping, replay metadata, files/images and serialization stay with that adapter. The background request preserves the original request prefix/model/session key/tools/reasoning and appends a request-only “Reply only OK. Do not use tools.” message. **Neither prompt nor output enters chat history; no returned tool calls are executed.** Only usage and sanitized finish metadata are consumed.
-
-The inspected account adapter requests one attempt (`maxRetries: 0`); Harness retries belong to AgentLoop, which warming does not enter. SSE makes one network attempt; WebSocket/auto can still perform native connection fallback/recovery. A ten-second cancellation deadline is additionally shortened to the remaining activity window. Codex does not honor a hard `maxTokens` cap; a short instruction and client cancellation are not a billing guarantee. Errors/cache misses stop that captured target until a genuine request replaces it.
-
-CodexZero-derived estimates: 30 minutes for reviewed modern families (`gpt-6-astra/sol/luna`, `gpt-5.5`, `gpt-5.6` variants, `gpt-daybreak-blue-latest`); five minutes for reviewed GPT-5 through GPT-5.4 legacy/Codex names. Unknown families have no default countdown or automatic schedule, but can receive an exact custom lifetime rule. Built-in defaults apply automatically and custom rules take precedence; legacy global opt-outs remain respected. These are approximate family assumptions, **not server-reported TTLs**. Reset estimates on observed cache-read/write evidence, not merely HTTP success or an attempted refresh. Elapsed estimate does not prove eviction.
-
-Route/account configuration and owner changes invalidate snapshots. Limitation: replacing credentials under the same configured account id does not expose a credential-generation event in `dsh-codex-account`; fresh credentials remain resolved by that owner. Changed native attachment projection can also affect cache reuse. A miss stops recurrence rather than claiming success.
+The shipped pi-ai OAuth `openai-codex` route, `deepseek-official` and retired custom `codex-personal`/`codex-business` routes can supply ordinary transcript cache evidence and appear in model discovery. This plugin never prepares or sends a background request on these routes. Historical saved overrides and per-chat opt-in cannot override the transport gate. A displayed local lifetime assumption is not server-reported expiry.
 
 ### OpenRouter
 
-Compatible models from the installed OpenRouter catalog use their own native Chat Completions serializer and compatibility settings, bound to the exact selected model. The previous single DeepSeek-model allowlist is removed. Native Anthropic-protocol models, dynamic router/search aliases, unknown pricing or unreviewed serialization capabilities remain unsupported, with a reason shown in the model list. Custom endpoints/headers/model overrides fail closed. Other provider routes (including direct DeepSeek) are discoverable but do not yet have a warming transport.
+Compatible models from the installed OpenRouter catalog use their own native Chat Completions serializer and compatibility settings, bound to the exact selected model. The previous single DeepSeek-model allowlist is removed. Native Anthropic-protocol models, dynamic router/search aliases, unknown pricing or unreviewed serialization capabilities remain unsupported, with a reason shown in the model list. The bounded transport currently admits only the reviewed pi-ai serializer version **`0.99.1`** and its pinned OpenRouter catalog digest. Older or otherwise unreviewed versions fail closed before a request. Custom endpoints/headers/model overrides fail closed. Other provider routes (including direct DeepSeek) are discoverable but do not yet have a warming transport.
 
 Expiry defaults to **unknown** for OpenRouter. Enable the model and configure an estimated lifetime to permit cost-aware scheduling; per-chat opt-in still applies. At most eight output tokens, no retries, ten-second deadline, and a 1 MiB serialized-request ceiling. Text/tool context only; attachment requests are rejected rather than silently altered. No tool calls are executed.
 
@@ -123,10 +113,10 @@ The popup distinguishes an absent snapshot from a captured request still in prog
 
 ## Verification
 
-`npm test` covers automatic model discovery, partial failures/timeouts, bilingual searchable settings, per-model enablement and defaults, economics, model-family estimates, the 27/30-minute timeline, lifecycle cancellation, failures, repeated refreshes, persistence, no transcript/tool execution, and loopback wire tests using the actual installed Codex account adapter and OpenRouter serializer. Synthetic credentials are confined to loopback; the suite sends no paid requests. Live scheduled cache benefit is not established by offline tests and requires a separately authorized provider test.
+`npm test` covers automatic model discovery, partial failures/timeouts, bilingual searchable settings, per-model enablement, independent economics, observation-only routes, the 27/30-minute timeline, lifecycle cancellation, failures, repeated refreshes, persistence, no transcript/tool execution, and loopback wire tests using the actual shipped OpenRouter serializer. Synthetic credentials are confined to loopback; the suite sends no paid requests. Live scheduled cache benefit is not established by offline tests and requires a separately authorized provider test.
 
-The integration tests require the tested Harness dependencies and a sibling `dsh-codex-account` checkout with its dependencies installed. They exercise the locally installed adapters, not a self-contained mock of the providers. Cross-peer identity tests run through the real Cordis proxy and prepared-call waterfall; they explicitly report a skip when the test installation is deduplicated and cannot reproduce the separate-registry layout.
+Integration tests require the tested Harness dependencies and shipped pi-ai adapter; they do not require a custom Codex account adapter. Cross-peer identity tests run through the real Cordis proxy and prepared-call waterfall; they explicitly report a skip when the test installation is deduplicated and cannot reproduce the separate-registry layout.
 
 ## License
 
-MIT; see [LICENSE](LICENSE).
+MIT; see [LICENSE](<LICENSE>).

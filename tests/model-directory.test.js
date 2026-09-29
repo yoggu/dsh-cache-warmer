@@ -19,7 +19,7 @@ test('directory uses every registered route, copies only model metadata and dedu
   } }, { inspect })
   const result = await directory.load()
   assert.deepEqual(calls, ['codex-business', 'deepseek', 'custom'])
-  assert.equal(result.providers[0].models[0].defaultCacheMinutes, 30)
+  assert.equal(result.providers[0].models[0].defaultCacheMinutes, null)
   assert.equal(result.providers[1].models[0].defaultCacheMinutes, null)
   assert.equal(result.providers[1].models.length, 1)
   assert.equal(result.providers[1].models[0].privateData, undefined)
@@ -172,6 +172,6 @@ test('adapter replacement invalidates a hanging same-id lookup without accepting
 test('capability metadata distinguishes unsupported providers and missing configured routes', () => {
   const ctx = { get: () => undefined }
   assert.deepEqual(modelTransportInfo(ctx, 'deepseek', 'deepseek-chat'), { transportSupported: false, reasonCode: 'unsupported-provider' })
-  assert.deepEqual(modelTransportInfo(ctx, 'codex-business', 'gpt-6-astra'), { transportSupported: false, reasonCode: 'route-unavailable' })
+  assert.deepEqual(modelTransportInfo(ctx, 'codex-business', 'gpt-6-astra'), { transportSupported: false, reasonCode: 'unsupported-provider' })
   assert.deepEqual(modelTransportInfo(ctx, 'openrouter', 'unknown/model'), { transportSupported: false, reasonCode: 'unsupported-model' })
 })
