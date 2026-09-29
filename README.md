@@ -6,16 +6,16 @@ Estimated **Cache time** with a draining ring, observed cached-token usage, and 
 
 The current implementation requires a compatible Harness runtime with its standard LLM, session projection, credentials and storage services, plus the shipped pi-ai adapter. The bounded OpenRouter transport and catalog snapshot are reviewed against **pi-ai 0.99.1**; a different serializer version or changed catalog fails closed until reviewed. There is no separate pi-ai dependency to upgrade in this plugin.
 
-Install the latest source from this repository's existing default branch:
+Install the latest tagged GitHub release:
 
 ```sh
-dsh plugin --profile web add 'https://github.com/yoggu/dsh-cache-warmer.git#master'
+dsh plugin --profile web add 'https://github.com/yoggu/dsh-cache-warmer.git#v0.1.6'
 ```
 
 Or link a local checkout:
 
 ```sh
-git clone https://github.com/yoggu/dsh-cache-warmer.git
+git clone --branch v0.1.6 --depth 1 https://github.com/yoggu/dsh-cache-warmer.git
 cd dsh-cache-warmer
 dsh plugin --profile web add "link:$(pwd)"
 ```
