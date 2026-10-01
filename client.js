@@ -138,6 +138,10 @@ window.__ModuleLoader__.load({
       };
       const reasons = zh ? {
         unsupported: '此线路暂无兼容的保温传输。', 'unknown-lifetime': '尚未设置缓存有效期估计；仅供观察。',
+        'unsafe-thinking-budget': '保留此请求的原生推理预算会超过安全的保温输出上限。',
+        'unsupported-no-retry': '此原生 SDK 无法停用保温请求的重试。',
+        'unsupported-version': '此原生适配器或序列化版本未经验证。',
+        'client-bound-opt-in-required': '请在插件设置中允许尽力而为的保温；此线路没有保证的服务端输出上限。',
         'policy-disabled': '此模型的缓存策略已禁止保温。', 'retention-disabled': '此线路已停用提示缓存保留。',
         'unknown-pricing': '模型价格未知，无法检查保温收益。', 'no-cache-evidence': '等待实际请求报告缓存命中。',
         'no-context': '等待新的已完成请求，以获取当前上下文。', disabled: descriptions.disabled,
@@ -153,7 +157,11 @@ window.__ModuleLoader__.load({
         ready: descriptions.waiting, warming: descriptions.warming,
       } : {
         unsupported: 'No compatible warming transport is available for this route.',
+        'unsafe-thinking-budget': 'Preserving this request’s native thinking budget would exceed the safe refresh output cap.',
+        'unsupported-no-retry': 'The native SDK cannot disable cache-refresh retries.',
+        'unsupported-version': 'This native adapter or serializer version is not reviewed.',
         'unknown-lifetime': 'No cache lifetime estimate is configured; observation only.',
+        'client-bound-opt-in-required': 'Enable best-effort warming in plugin settings; this route has no guaranteed server-side output cap.',
         'policy-disabled': 'The model cache policy disables warming.', 'retention-disabled': 'Prompt cache retention is disabled for this route.',
         'unknown-pricing': 'Model pricing is unknown, so the cost check cannot run.', 'no-cache-evidence': 'Waiting for a real request to report a cache hit.',
         'no-context': 'Waiting for a completed real request with current context.', disabled: descriptions.disabled,
@@ -175,11 +183,12 @@ window.__ModuleLoader__.load({
         return { state: 'unavailable', label: states.unavailable, description: error === 'load'
           ? (zh ? '无法加载保温状态，请稍后重试。' : 'Could not load warming status; try again shortly.') : descriptions.unavailable };
       }
-      const reason = status.reasonCode;
+      const reason = status.reasonCode === 'unsupported' && status.transportReasonCode
+        ? status.transportReasonCode : status.reasonCode;
       let state = Object.hasOwn(states, status.warmingState) ? status.warmingState : null;
       if (!state) {
         if (status.warming === true) state = 'warming';
-        else if (status.enabled === false || ['disabled', 'policy-disabled', 'retention-disabled', 'idle-probability-zero'].includes(reason)) state = 'disabled';
+        else if (status.enabled === false || ['disabled', 'policy-disabled', 'client-bound-opt-in-required', 'retention-disabled', 'idle-probability-zero'].includes(reason)) state = 'disabled';
         else if (status.supported === false || ['unsupported', 'no-storage', 'unknown-lifetime', 'unknown-pricing', 'request-identity-unavailable', 'session-unavailable', 'economics-missing-pricing'].includes(reason)) state = 'unavailable';
         else if (['stopped', 'window-ended', 'window-too-short', 'cache-elapsed'].includes(reason)) state = 'stopped';
         else if (reason === 'insufficient-savings') state = 'skipped';
@@ -530,6 +539,9 @@ window.__ModuleLoader__.load({
           status?.warmUsage && h(React.Fragment, null,
             metric(zh ? '保温请求次数' : 'Warm requests', String(status.warmUsage.attempts)),
             metric(zh ? '保温费用估计' : 'Warm usage estimate', `${money(status.warmUsage.usd)}${status.warmUsage.unpriced ? (zh ? ' · 部分' : ' · partial') : ''}`)),
+          status?.outputBound === 'client' && h('div', { style: { ...mutedStyle, paddingTop: 8 } },
+            zh ? '尽力而为：没有保证的服务端输出上限。隐藏推理及客户端取消后的生成仍可能消耗用量。'
+              : 'Best effort: no guaranteed server-side output cap. Hidden reasoning and generation after client cancellation may still consume usage.'),
           status?.decision?.subscription && h('div', { style: { ...mutedStyle, paddingTop: 8 } },
             zh ? '金额为 API 等价估计，并非账单或订阅配额。保温会消耗用量。'
               : 'Dollars are API-equivalent estimates, not a bill or subscription quota. Warming consumes usage.'),
@@ -557,6 +569,7 @@ window.__ModuleLoader__.load({
       // Catalog metadata never enters the editable settings or a POST body.
       const editable = value => ({ autoWarmNewChats: value.autoWarmNewChats, activeMinutes: value.activeMinutes,
         idleMinutes: value.idleMinutes, useCodexDefaults: value.useCodexDefaults !== false,
+        allowClientBoundWarming: value.allowClientBoundWarming === true,
         minExpectedBenefitUsd: value.minExpectedBenefitUsd === undefined ? 0.05 : value.minExpectedBenefitUsd,
         idleContinuationPercent: value.idleContinuationPercent === undefined ? 15 : value.idleContinuationPercent,
         modelPolicies: (value.modelPolicies || []).map(row => ({ provider: row.provider, model: row.model,
@@ -573,7 +586,9 @@ window.__ModuleLoader__.load({
         benefitHelp: '扣除预计刷新费用后，净收益必须达到此门槛（0–1000 美元）。降低门槛可能增加保温请求和用量。',
         probabilityHelp: '空闲时再次使用缓存的本地概率假设（整数 0–100%）。提高概率可能增加保温和用量；设为 0 会阻止空闲保温。',
         costHelp: '这些值是本地决策假设，不是提供商的保证。运行中继续对话的概率固定为 100%；其他安全检查仍然生效。',
-        codexCostHelp: '价格估计不授予保温权限。仅兼容的 OpenRouter 线路可发送后台请求；Codex 与 DeepSeek 官方线路仅记录缓存观测。',
+        clientBound: '允许尽力而为的保温（Codex / OAuth）',
+        clientBoundHelp: '没有保证的服务端输出上限。插件请求简短回复并在客户端取消，但隐藏推理及取消后的生成仍可能消耗用量；费用估计不是支出或配额上限。',
+        codexCostHelp: '使用 llm-pi-ai 的原生提供商线路。仍需模型及对话开关、缓存证据和收益检查；未知价格或不兼容能力会阻止发送。',
         invalidSettings: '窗口需为 0–1440 的整数分钟；净收益门槛需为 0–1000 的有限数字；空闲概率需为 0–100 的整数。必填项不能留空。',
         loadTimeout: '设置加载超时，请重试。', modelsTimeout: '模型加载超时。已保留现有列表和自定义规则，请重试。',
         loadError: '无法加载设置。', saveError: '保存失败；未保存的修改已保留。', save: '保存', saving: '保存中…', loading: '加载中…',
@@ -598,7 +613,9 @@ window.__ModuleLoader__.load({
         benefitHelp: 'After the estimated refresh cost, the net benefit must reach this threshold (USD 0–1000). A lower threshold can mean more warming and usage.',
         probabilityHelp: 'Local chance of reusing the cache while idle (whole percent, 0–100). A higher probability can mean more warming and usage; 0 blocks idle warming.',
         costHelp: 'These are local decision assumptions, not provider guarantees. Continuation probability while running is fixed at 100%; other safety checks still apply.',
-        codexCostHelp: 'A price estimate never grants warming permission. Only compatible OpenRouter routes may send; Codex and direct DeepSeek remain observation-only.',
+        clientBound: 'Allow best-effort warming (Codex / OAuth)',
+        clientBoundHelp: 'No guaranteed server-side output cap. The plugin requests a short reply and cancels locally, but hidden reasoning or generation after cancellation can still consume usage. Estimates are not spending or quota caps.',
+        codexCostHelp: 'Uses llm-pi-ai native provider routes. Model and chat opt-in, cache evidence and the cost check still apply; unknown prices or incompatible capabilities block sends.',
         invalidSettings: 'Windows require whole minutes from 0–1440; the benefit threshold requires a finite number from 0–1000; idle probability requires a whole percent from 0–100. Required fields cannot be blank.',
         loadTimeout: 'Settings took too long to load. Please retry.', modelsTimeout: 'Models took too long to load. Existing models and overrides are preserved; please retry.',
         loadError: 'Could not load settings.', saveError: 'Save failed; unsaved changes are preserved.', save: 'Save', saving: 'Saving …', loading: 'Loading …',
@@ -616,10 +633,20 @@ window.__ModuleLoader__.load({
         'unsupported-model': '此模型无兼容传输', 'unsupported-protocol': '协议不受支持', 'unknown-pricing': '价格未知',
         'unsupported-route': '线路不受支持', 'unsupported-capability': '缺少所需能力', 'catalog-unavailable': '能力目录不可用',
         'retention-disabled': '缓存保留已停用', 'unsupported-provider': '提供商不受支持', 'route-unavailable': '线路不可用',
+        'unsupported-no-retry': '原生 SDK 无法停用重试',
+        'unsafe-thinking-budget': '所需推理预算超过保温输出上限',
+        'unsupported-reasoning': '原生模型不支持此请求的推理级别',
+        'unsupported-version': '适配器或序列化版本未经验证',
+        'unsupported-fallbacks': '模型备用路由不受支持',
       } : {
         'unsupported-model': 'No compatible model transport', 'unsupported-protocol': 'Unsupported protocol', 'unknown-pricing': 'Pricing unknown',
         'unsupported-route': 'Unsupported route', 'unsupported-capability': 'Required capability unavailable', 'catalog-unavailable': 'Capability catalog unavailable',
         'retention-disabled': 'Cache retention disabled', 'unsupported-provider': 'Unsupported provider', 'route-unavailable': 'Route unavailable',
+        'unsupported-no-retry': 'Native SDK retries cannot be disabled',
+        'unsafe-thinking-budget': 'Required thinking budget exceeds the refresh output cap',
+        'unsupported-reasoning': 'The native model does not support this request’s reasoning level',
+        'unsupported-version': 'Adapter or serializer version is not reviewed',
+        'unsupported-fallbacks': 'Model fallback routing is unsupported',
       };
       React.useEffect(() => {
         let active = true;
@@ -755,6 +782,8 @@ window.__ModuleLoader__.load({
           !custom && draft?.useCodexDefaults === false && model.defaultCacheMinutes != null && h('div', { className: 'dsh-cache-policy-status' }, t.legacy),
           !model.available ? h('div', { className: 'dsh-cache-policy-status' }, t.unavailable)
             : !model.transportSupported && h('div', { className: 'dsh-cache-policy-status' }, `${zh ? '仅供观察' : 'Observation only'} · ${reasons[model.reasonCode] || (zh ? '保温传输不受支持' : 'Warming transport unsupported')}`),
+          model.transportSupported && model.outputBound === 'client' && h('div', { className: 'dsh-cache-policy-status' },
+            zh ? '尽力而为 · 无保证的服务端输出上限 · 需额外允许' : 'Best effort · No guaranteed server-side output cap · Additional opt-in required'),
           h('label', { className: 'dsh-cache-policy-lifetime' }, h('span', null, t.lifetime),
             h('input', { className: 'dsh-cache-settings-input dsh-cache-policy-minutes', type: 'number', min: 1, max: 10080, step: 1,
               'aria-label': `${t.lifetime} ${identity}`, value: row.cacheMinutes ?? '', placeholder: t.unknown, disabled: locked,
@@ -779,6 +808,11 @@ window.__ModuleLoader__.load({
           field('activeMinutes', t.active, t.activeHelp), field('idleMinutes', t.idle, t.idleHelp),
           h('div', { className: 'dsh-cache-settings-window-note' },
             h('p', null, t.windowHelp), h('p', null, t.windowExample)),
+          h('label', { className: 'dsh-cache-settings-row' }, settingText('allowClientBoundWarming', t.clientBound, t.clientBoundHelp),
+            h('button', { type: 'button', role: 'switch', className: 'dsh-cache-settings-switch',
+              'aria-checked': draft.allowClientBoundWarming, 'aria-label': t.clientBound, disabled: busy,
+              'aria-describedby': `${helpId}-allowClientBoundWarming`,
+              onClick: () => set('allowClientBoundWarming', !draft.allowClientBoundWarming) }, h('span', { className: 'dsh-cache-settings-thumb', 'aria-hidden': true }))),
           h('details', { className: 'dsh-cache-settings-advanced' },
             h('summary', null, t.advanced),
             h('p', { className: 'dsh-cache-policy-note' }, t.costHelp),

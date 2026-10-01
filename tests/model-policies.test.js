@@ -187,6 +187,26 @@ test('legacy and OAuth Codex routes cannot schedule even with saved opt-ins', ()
   }
 })
 
+test('observation-only routes display explicit estimates without a reported retention tier', () => {
+  for (const provider of ['openai-codex', 'codex-personal', 'codex-business', 'deepseek-official']) {
+    for (const enabled of [true, false]) {
+      const p = policyFor(provider, 'gpt-6.1-sol',
+        settings(row({ provider, model: 'gpt-6.1-sol', enabled })), 'unknown')
+      assert.equal(p.cacheTtlMs, 30 * MINUTE)
+      assert.equal(p.retention, 'unknown', 'do not invent provider retention')
+      assert.equal(p.transportSupported, false)
+      assert.equal(p.warmingAllowed, false)
+      assert.equal(decisionDelay(p), null)
+      assert.equal(nextDecisionAt({ lastRequestAt: 1000, lastCacheHitAt: 1000, agentRunning: true },
+        true, { activeMinutes: 60, idleMinutes: 30 }, p, 1000), null)
+    }
+    assert.equal(policyFor(provider, 'gpt-6.1-sol',
+      settings(row({ provider, model: 'gpt-6.1-sol', cacheMinutes: null })), 'unknown').cacheTtlMs, null)
+    assert.equal(policyFor(provider, 'gpt-6.1-sol',
+      settings(row({ provider, model: 'gpt-6.1-sol' })), 'none').cacheTtlMs, null)
+  }
+})
+
 test('OpenRouter never invents a lifetime or cadence; compatible catalog models can warm', () => {
   for (const model of [OPENROUTER_MODEL, 'anthropic/claude-sonnet-4', 'new/model']) {
     const p = policyFor('openrouter', model)
@@ -218,6 +238,30 @@ test('OpenRouter never invents a lifetime or cadence; compatible catalog models 
   assert.equal(unsupported.warmingAllowed, false)
   assert.equal(unsupported.transportSupported, false)
   assert.equal(decisionDelay(unsupported), null)
+})
+
+test('verified native pi-ai capabilities grant transport only with policy and best-effort consent', () => {
+  const provider = 'openai-codex', model = 'gpt-6.1-sol'
+  const native = { owned: true, supported: true, kind: 'pi-ai', outputBound: 'client', maxOutputTokens: 256, outputReserve: 256 }
+  const s = settings(row({ provider, model }))
+  const blocked = policyFor(provider, model, s, 'unknown', native)
+  assert.equal(blocked.transportSupported, true)
+  assert.equal(blocked.cacheTtlMs, 30 * MINUTE)
+  assert.equal(blocked.clientBoundConsentRequired, true)
+  assert.equal(blocked.warmingAllowed, false)
+  const admitted = policyFor(provider, model, { ...s, allowClientBoundWarming: true }, 'unknown', native)
+  assert.equal(admitted.kind, 'pi-ai')
+  assert.equal(admitted.warmingAllowed, true)
+  assert.equal(admitted.outputReserve, 256)
+  assert.equal(admitted.extraInputTokens, 64)
+  assert.equal(nextDecisionAt({ lastRequestAt: 1000, lastCacheHitAt: 1000, agentRunning: true }, true,
+    { activeMinutes: 60, idleMinutes: 30 }, admitted, 1000), 1000 + 27 * MINUTE)
+  for (const capability of [{ ...native, supported: false }, { ...native, owned: false }]) {
+    assert.equal(policyFor(provider, model, { ...s, allowClientBoundWarming: true }, 'unknown', capability).warmingAllowed, false)
+  }
+  const direct = policyFor('anthropic', 'claude', settings(row({ provider: 'anthropic', model: 'claude' })), 'short',
+    { ...native, outputBound: 'server' })
+  assert.equal(direct.warmingAllowed, true, 'server-bounded native models need no client-only consent')
 })
 
 test('configured non-reviewed providers remain unsupported regardless of economic benefit', () => {

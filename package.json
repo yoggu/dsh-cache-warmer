@@ -1,6 +1,6 @@
 {
   "name": "dsh-cache-warmer",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Estimated cache time and opt-in, cost-aware prompt-cache warming for DeepSeek Harness sessions.",
   "repository": {
@@ -39,6 +39,11 @@
   "engines": {
     "node": ">=22.19.0",
     "dsh": "^0.1.6-alpha.2 || ^0.1.7-rc.2 || ^0.2.0-rc.1"
+  },
+  "overrides": {
+    "@deepseek-ai/dsh-llm-pi-ai": {
+      "@earendil-works/pi-ai": "0.99.1"
+    }
   },
   "scripts": { "test": "node --test lib/*.test.js tests/*.test.js" }
 }

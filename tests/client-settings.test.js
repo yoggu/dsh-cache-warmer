@@ -6,7 +6,7 @@ import vm from 'node:vm'
 const model = (id, overrides = {}) => ({ id, name: id, defaultCacheMinutes: null, transportSupported: true, reasonCode: null, ...overrides })
 const provider = (id, models, overrides = {}) => ({ id, name: id, models, ...overrides })
 const policy = (provider, model, cacheMinutes, enabled = false) => ({ provider, model, enabled, cacheMinutes })
-const base = { autoWarmNewChats: false, activeMinutes: 60, idleMinutes: 30, useCodexDefaults: true,
+const base = { autoWarmNewChats: false, allowClientBoundWarming: false, activeMinutes: 60, idleMinutes: 30, useCodexDefaults: true,
   minExpectedBenefitUsd: 0.05, idleContinuationPercent: 15, modelPolicies: [] }
 const codex = { providers: [provider('codex-business', [model('gpt-5', { name: 'GPT 5', defaultCacheMinutes: 30 })])] }
 const openrouter = { providers: [provider('openrouter', [model('deepseek/flash')])] }
@@ -98,7 +98,7 @@ for (const locale of ['en', 'zh']) test(`one numeric lifetime and independent al
   assert.match(f.lifetime(id).props.className, /dsh-cache-policy-minutes/)
   assert.equal(f.toggle(id).props.role, 'switch')
   assert.equal(f.all().filter(node => node.type === 'input' && node.props.type === 'number').length, 5)
-  assert.equal(f.all().filter(node => node.props.role === 'switch').length, 2, 'new-chat and per-model native switches')
+  assert.equal(f.all().filter(node => node.props.role === 'switch').length, 3, 'new-chat, best-effort consent and per-model native switches')
   assert.equal(f.all().filter(node => node.props.type === 'checkbox').length, 0, 'model uses native switch rather than checkbox')
   assert.ok(!f.all().some(node => node.type === 'input' && node.props.type === 'text'), 'no manual IDs')
   f.lifetime(id).props.onChange({ target: { value: '45' } })
@@ -115,6 +115,19 @@ for (const locale of ['en', 'zh']) test(`one numeric lifetime and independent al
   await f.save().props.onClick()
   assert.deepEqual(f.posts[1].modelPolicies, [policy('openrouter', 'deepseek/flash', null, true)])
   assert.match(f.text(), locale === 'zh' ? /空白 — 不会自动保温/ : /Blank — no automatic warming/)
+})
+
+test('best-effort native routes require clear separate consent, default off and persist it', async () => {
+  const f = fixture({ models: { providers: [provider('openai-codex', [model('gpt-6.1-sol', { outputBound: 'client' })])] } })
+  await f.flush()
+  const label = 'Allow best-effort warming (Codex / OAuth)'
+  assert.equal(f.button(label).props['aria-checked'], false)
+  assert.match(f.text(), /No guaranteed server-side output cap/)
+  assert.match(f.text(), /Estimates are not spending or quota caps/)
+  await f.click(label)
+  await f.save().props.onClick()
+  assert.equal(f.posts[0].allowClientBoundWarming, true)
+  assert.deepEqual(f.posts[0].modelPolicies, [], 'global best-effort consent does not enable any model')
 })
 
 test('independent settings/model loads, automatic defaults, plugin-only registration and no catalog serialized', async () => {
@@ -177,7 +190,7 @@ test('legacy defaults=false remains hidden and reset writes an explicit metadata
   await f.save().props.onClick()
   assert.equal(f.posts[0].useCodexDefaults, false)
   assert.deepEqual(f.posts[0].modelPolicies, [policy('codex-business', 'gpt-5', 30, true)])
-  assert.equal(f.all().filter(node => node.props.role === 'switch').length, 2)
+  assert.equal(f.all().filter(node => node.props.role === 'switch').length, 3)
 })
 
 test('large catalogs show full counts with bounded pages, provider groups and case-insensitive search', async () => {
@@ -293,9 +306,9 @@ for (const locale of ['en', 'zh']) test(`settings explain default opt-in and req
   const f = fixture({ locale })
   await f.flush()
   const helpers = f.all().filter(n => n.props.className === 'dsh-cache-settings-help')
-  assert.equal(helpers.length, 5)
+  assert.equal(helpers.length, 6)
   const described = f.all().filter(n => n.props['aria-describedby'])
-  assert.equal(described.length, 5)
+  assert.equal(described.length, 6)
   for (const control of described) assert.ok(helpers.some(n => n.props.id === control.props['aria-describedby']))
   assert.match(f.text(), /14:00/)
   assert.match(f.text(), /14:30/)
@@ -328,7 +341,8 @@ for (const locale of ['en', 'zh']) test(`collapsed plugin cost checks explain as
   assert.match(f.text(), locale === 'zh' ? /设为 0 会阻止空闲保温/ : /0 blocks idle warming/)
   assert.match(f.text(), locale === 'zh' ? /固定为 100%/ : /fixed at 100%/)
   assert.match(f.text(), locale === 'zh' ? /本地决策假设/ : /local decision assumptions/)
-  assert.match(f.text(), locale === 'zh' ? /价格估计不授予保温权限/ : /price estimate never grants warming permission/)
+  assert.match(f.text(), locale === 'zh' ? /llm-pi-ai 的原生提供商线路/ : /llm-pi-ai native provider routes/)
+  assert.match(f.text(), locale === 'zh' ? /未知价格或不兼容能力会阻止发送/ : /unknown prices or incompatible capabilities block sends/)
   f.change(benefit, '0.003')
   f.change(probability, '60')
   await f.save().props.onClick()
@@ -405,7 +419,7 @@ test('advanced controls preserve native typography, compact lifetime width and m
   assert.match(css, /\.dsh-cache-settings-advanced summary\{[^}]*font-size:14px/)
   assert.match(css, /\.dsh-cache-policy-minutes\{width:96px/)
   assert.match(css, /@media\(max-width:480px\).*dsh-cache-settings-input\{font-size:16px\}/)
-  assert.equal(f.all().filter(node => node.props.role === 'switch').length, 2)
+  assert.equal(f.all().filter(node => node.props.role === 'switch').length, 3)
 })
 
 for (const locale of ['en', 'zh']) test(`stalled reads time out, abort, expose Retry and reject late stale results (${locale})`, async () => {

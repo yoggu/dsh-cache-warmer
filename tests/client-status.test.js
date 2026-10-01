@@ -148,6 +148,26 @@ test('old host needs an actual future timer; loading and failed polling never cl
   await f.unmount()
 })
 
+test('native client-bounded status explains separate consent and uncertain provider-side usage', async () => {
+  const f = fixture({ status: { ...base, outputBound: 'client', warmingState: 'disabled', reasonCode: 'client-bound-opt-in-required' } })
+  await f.flush()
+  assert.equal(textOf(f.byClass('dsh-cache-warmer-state')), 'Disabled')
+  assert.match(f.text(), /Enable best-effort warming in plugin settings/)
+  assert.match(f.text(), /no guaranteed server-side output cap/)
+  assert.match(f.text(), /Hidden reasoning and generation after client cancellation may still consume usage/)
+  assert.match(f.text(), /Cache lifetime 30 min/)
+  await f.unmount()
+})
+
+test('unsupported native request explains the exact safe-thinking gate without hiding the countdown', async () => {
+  const f = fixture({ status: { ...base, supported: false, warmingState: 'unavailable', reasonCode: 'unsupported', transportReasonCode: 'unsafe-thinking-budget' } })
+  await f.flush()
+  assert.equal(textOf(f.byClass('dsh-cache-warmer-state')), 'Unavailable')
+  assert.match(f.text(), /Preserving this request’s native thinking budget would exceed the safe refresh output cap/)
+  assert.match(f.text(), /Cache lifetime 30 min/)
+  await f.unmount()
+})
+
 test('unknown and elapsed cache estimates retain compact rows without fabricated lifetimes', async () => {
   for (const [status, remaining, lifetime] of [
     [{ ...base, cacheTtlMs: null, cacheExpiresAt: null }, 'Unknown', 'Unknown'],
